@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/gofrs/uuid"
 
@@ -35,6 +36,16 @@ type PKCEGrantParams struct {
 
 const useCookieHeader = "x-use-cookie"
 const InvalidLoginMessage = "Invalid login credentials"
+
+const dummyPasswordHash = "$2a$10$JUbiChr4qVqzEEHDLbRmgOvGTUajEl0g6JJjOzN.drbF9oX.iL/sq"
+
+// performDummyPasswordVerification prevents user enumeration via timing attacks
+func (a *API) performDummyPasswordVerification(ctx context.Context, password string) {
+	_ = crypto.CompareHashAndPassword(ctx, dummyPasswordHash, password)
+	if delayMs := a.config.Security.TimingObfuscationDelay; delayMs > 0 {
+		time.Sleep(time.Duration(delayMs) * time.Millisecond)
+	}
+}
 
 // Token is the endpoint for OAuth access token requests
 func (a *API) Token(w http.ResponseWriter, r *http.Request) error {
@@ -108,12 +119,14 @@ func (a *API) ResourceOwnerPasswordGrant(ctx context.Context, w http.ResponseWri
 
 	if err != nil {
 		if models.IsNotFoundError(err) {
+			a.performDummyPasswordVerification(ctx, params.Password)
 			return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, InvalidLoginMessage)
 		}
 		return apierrors.NewInternalServerError("Database error querying schema").WithInternalError(err)
 	}
 
 	if !user.HasPassword() {
+		a.performDummyPasswordVerification(ctx, params.Password)
 		return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, InvalidLoginMessage)
 	}
 
