@@ -734,13 +734,13 @@ func (a *API) verifyUserAndToken(conn *storage.Connection, params *VerifyParams,
 		"params_type": params.Type,
 		"token_type":  tokenType,
 		"user_id":     user.ID.String(),
-	}).Debug("OTP Protection: Getting token type for verification")
+	}).Info("OTP Protection: Getting token type for verification")
 	if tokenType != "" {
 		invalidated, err := checkOTPTokenInvalidated(conn, user.ID.String(), tokenType)
 		logrus.WithFields(logrus.Fields{
 			"invalidated": invalidated,
 			"error":       err,
-		}).Debug("OTP Protection: Checked if token is invalidated")
+		}).Info("OTP Protection: Checked if token is invalidated")
 		if err == nil && invalidated {
 			return nil, apierrors.NewForbiddenError(apierrors.ErrorCodeOTPExpired, "Token has been invalidated due to too many failed attempts. Please request a new verification code.")
 		}
@@ -799,12 +799,12 @@ func (a *API) verifyUserAndToken(conn *storage.Connection, params *VerifyParams,
 			"user_id":    user.ID.String(),
 			"token_type": tokenType,
 			"is_valid":   isValid,
-		}).Debug("OTP Protection: Recording OTP attempt")
+		}).Info("OTP Protection: Recording OTP attempt")
 		if err := recordOTPAttempt(conn, user.ID.String(), tokenType, isValid); err != nil {
 			// Log error but don't fail the request
 			logrus.WithError(err).Warn("Failed to record OTP attempt")
 		} else {
-			logrus.Debug("OTP Protection: Successfully recorded OTP attempt")
+			logrus.Info("OTP Protection: Successfully recorded OTP attempt")
 		}
 	}
 
@@ -897,11 +897,11 @@ func recordOTPAttempt(conn *storage.Connection, userID string, tokenType string,
 		"user_id":    userID,
 		"token_type": tokenType,
 		"is_valid":   isValid,
-	}).Debug("recordOTPAttempt called")
+	}).Info("recordOTPAttempt called")
 
 	// If token is valid, reset attempts
 	if isValid {
-		logrus.Debug("Token valid - resetting attempt count")
+		logrus.Info("Token valid - resetting attempt count")
 		err := conn.RawQuery(`
 			UPDATE auth.one_time_tokens
 			SET attempt_count = 0, invalidated_at = NULL
@@ -910,13 +910,13 @@ func recordOTPAttempt(conn *storage.Connection, userID string, tokenType string,
 		if err != nil {
 			logrus.WithError(err).Error("Failed to reset attempt count")
 		} else {
-			logrus.Debug("Successfully reset attempt count")
+			logrus.Info("Successfully reset attempt count")
 		}
 		return err
 	}
 
 	// Token is invalid - increment attempt count
-	logrus.Debug("Token invalid - incrementing attempt count")
+	logrus.Info("Token invalid - incrementing attempt count")
 	var attemptCount int
 	err := conn.RawQuery(`
 		UPDATE auth.one_time_tokens
@@ -930,7 +930,7 @@ func recordOTPAttempt(conn *storage.Connection, userID string, tokenType string,
 		return err
 	}
 
-	logrus.WithField("attempt_count", attemptCount).Debug("Incremented attempt count")
+	logrus.WithField("attempt_count", attemptCount).Info("Incremented attempt count")
 
 	// If max attempts reached, invalidate the token
 	if attemptCount >= maxOTPVerificationAttempts {
@@ -943,12 +943,12 @@ func recordOTPAttempt(conn *storage.Connection, userID string, tokenType string,
 		if err != nil {
 			logrus.WithError(err).Error("Failed to invalidate token")
 		} else {
-			logrus.Debug("Successfully invalidated token")
+			logrus.Info("Successfully invalidated token")
 		}
 		return err
 	}
 
-	logrus.Debug("Attempt recorded successfully")
+	logrus.Info("Attempt recorded successfully")
 	return nil
 }
 
