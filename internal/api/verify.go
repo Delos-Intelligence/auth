@@ -15,6 +15,7 @@ import (
 	"github.com/supabase/auth/internal/api/apierrors"
 	"github.com/supabase/auth/internal/api/provider"
 	"github.com/supabase/auth/internal/api/sms_provider"
+	"github.com/supabase/auth/internal/conf"
 	"github.com/supabase/auth/internal/crypto"
 	mail "github.com/supabase/auth/internal/mailer"
 	"github.com/supabase/auth/internal/metering"
@@ -793,14 +794,16 @@ func (a *API) verifyUserAndToken(conn *storage.Connection, params *VerifyParams,
 		isValid = isOtpValid(tokenHash, expectedToken, sentAt, config.Sms.OtpExp)
 	}
 
-	// OTP Protection: Record attempt
+	// OTP Protection: Record attempt in a separate autonomous transaction
+	// This ensures the attempt count persists even if the main transaction rolls back
 	if tokenType != "" {
 		logrus.WithFields(logrus.Fields{
 			"user_id":    user.ID.String(),
 			"token_type": tokenType,
 			"is_valid":   isValid,
 		}).Info("OTP Protection: Recording OTP attempt")
-		if err := recordOTPAttempt(conn, user.ID.String(), tokenType, isValid); err != nil {
+		// Use a new connection to create an autonomous transaction
+		if err := recordOTPAttemptAutonomous(config, user.ID.String(), tokenType, isValid); err != nil {
 			// Log error but don't fail the request
 			logrus.WithError(err).Warn("Failed to record OTP attempt")
 		} else {
@@ -889,6 +892,21 @@ func checkOTPTokenInvalidated(conn *storage.Connection, userID string, tokenType
 	}
 
 	return invalidatedAt != nil, nil
+}
+
+// recordOTPAttemptAutonomous records an OTP attempt in an autonomous transaction
+// This ensures the attempt count persists even if the calling transaction rolls back
+func recordOTPAttemptAutonomous(config *conf.GlobalConfiguration, userID string, tokenType string, isValid bool) error {
+	// Create a new database connection for autonomous transaction
+	db, err := storage.Dial(config)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	return db.Transaction(func(tx *storage.Connection) error {
+		return recordOTPAttempt(tx, userID, tokenType, isValid)
+	})
 }
 
 // recordOTPAttempt records a failed OTP verification attempt and invalidates token after max failures
