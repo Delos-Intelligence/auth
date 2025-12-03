@@ -36,6 +36,14 @@ type PKCEGrantParams struct {
 const useCookieHeader = "x-use-cookie"
 const InvalidLoginMessage = "Invalid login credentials"
 
+const dummyPasswordHash = "$2a$10$JUbiChr4qVqzEEHDLbRmgOvGTUajEl0g6JJjOzN.drbF9oX.iL/sq"
+
+// performDummyPasswordVerification prevents user enumeration via timing attacks
+// by performing a bcrypt comparison even when user is not found
+func (a *API) performDummyPasswordVerification(ctx context.Context, password string) {
+	_ = crypto.CompareHashAndPassword(ctx, dummyPasswordHash, password)
+}
+
 // Token is the endpoint for OAuth access token requests
 func (a *API) Token(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
@@ -108,12 +116,14 @@ func (a *API) ResourceOwnerPasswordGrant(ctx context.Context, w http.ResponseWri
 
 	if err != nil {
 		if models.IsNotFoundError(err) {
+			a.performDummyPasswordVerification(ctx, params.Password)
 			return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, InvalidLoginMessage)
 		}
 		return apierrors.NewInternalServerError("Database error querying schema").WithInternalError(err)
 	}
 
 	if !user.HasPassword() {
+		a.performDummyPasswordVerification(ctx, params.Password)
 		return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, InvalidLoginMessage)
 	}
 
@@ -207,7 +217,7 @@ func (a *API) ResourceOwnerPasswordGrant(ctx context.Context, w http.ResponseWri
 	metering.RecordLogin(metering.LoginTypePassword, user.ID, &metering.LoginData{
 		Provider: provider,
 	})
-	return sendJSON(w, http.StatusOK, token)
+	return sendTokenJSON(w, http.StatusOK, token)
 }
 
 func (a *API) PKCE(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
@@ -284,7 +294,7 @@ func (a *API) PKCE(ctx context.Context, w http.ResponseWriter, r *http.Request) 
 	metering.RecordLogin(metering.LoginTypePKCE, user.ID, &metering.LoginData{
 		Provider: flowState.ProviderType,
 	})
-	return sendJSON(w, http.StatusOK, token)
+	return sendTokenJSON(w, http.StatusOK, token)
 }
 
 func (a *API) generateAccessToken(r *http.Request, tx *storage.Connection, user *models.User, sessionId *uuid.UUID, authenticationMethod models.AuthenticationMethod) (string, int64, error) {
