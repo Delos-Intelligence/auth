@@ -866,7 +866,7 @@ func checkOTPTokenInvalidated(conn *storage.Connection, userID string, tokenType
 	`, userID, tokenType).First(&invalidatedAt)
 
 	if err != nil {
-		if storage.IsNotFoundError(err) {
+		if models.IsNotFoundError(err) {
 			return false, nil
 		}
 		return false, err
@@ -879,7 +879,7 @@ func checkOTPTokenInvalidated(conn *storage.Connection, userID string, tokenType
 func recordOTPAttempt(conn *storage.Connection, userID string, tokenType string, isValid bool) error {
 	// If token is valid, reset attempts
 	if isValid {
-		_, err := conn.RawQuery(`
+		err := conn.RawQuery(`
 			UPDATE auth.one_time_tokens
 			SET attempt_count = 0, invalidated_at = NULL
 			WHERE user_id = $1 AND token_type = $2::auth.one_time_token_type
@@ -902,7 +902,7 @@ func recordOTPAttempt(conn *storage.Connection, userID string, tokenType string,
 
 	// If max attempts reached, invalidate the token
 	if attemptCount >= maxOTPVerificationAttempts {
-		_, err = conn.RawQuery(`
+		err = conn.RawQuery(`
 			UPDATE auth.one_time_tokens
 			SET invalidated_at = NOW()
 			WHERE user_id = $1 AND token_type = $2::auth.one_time_token_type
@@ -915,7 +915,7 @@ func recordOTPAttempt(conn *storage.Connection, userID string, tokenType string,
 
 // clearOTPAttempts resets attempt tracking when a new OTP is generated
 func clearOTPAttempts(conn *storage.Connection, userID string, tokenType string) error {
-	_, err := conn.RawQuery(`
+	err := conn.RawQuery(`
 		UPDATE auth.one_time_tokens
 		SET attempt_count = 0, invalidated_at = NULL
 		WHERE user_id = $1 AND token_type = $2::auth.one_time_token_type
