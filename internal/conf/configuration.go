@@ -731,7 +731,6 @@ type SecurityConfiguration struct {
 	UpdatePasswordRequireReauthentication bool                 `json:"update_password_require_reauthentication" split_words:"true"`
 	UpdatePasswordRequireCurrentPassword  bool                 `json:"update_password_require_current_password" split_words:"true" default:"false"`
 	ManualLinkingEnabled                  bool                 `json:"manual_linking_enabled" split_words:"true" default:"false"`
-	TimingObfuscationDelay                int                  `json:"timing_obfuscation_delay" split_words:"true" default:"0"`
 
 	DBEncryption DatabaseEncryptionConfiguration `json:"database_encryption" split_words:"true"`
 }

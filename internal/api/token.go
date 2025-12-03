@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"net/http"
-	"time"
 
 	"github.com/gofrs/uuid"
 
@@ -40,11 +39,9 @@ const InvalidLoginMessage = "Invalid login credentials"
 const dummyPasswordHash = "$2a$10$JUbiChr4qVqzEEHDLbRmgOvGTUajEl0g6JJjOzN.drbF9oX.iL/sq"
 
 // performDummyPasswordVerification prevents user enumeration via timing attacks
+// by performing a bcrypt comparison even when user is not found
 func (a *API) performDummyPasswordVerification(ctx context.Context, password string) {
 	_ = crypto.CompareHashAndPassword(ctx, dummyPasswordHash, password)
-	if delayMs := a.config.Security.TimingObfuscationDelay; delayMs > 0 {
-		time.Sleep(time.Duration(delayMs) * time.Millisecond)
-	}
 }
 
 // Token is the endpoint for OAuth access token requests
