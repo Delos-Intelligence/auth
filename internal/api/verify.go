@@ -35,6 +35,11 @@ const (
 	singleConfirmation
 )
 
+// OTP brute force protection
+const (
+	maxOTPVerificationAttempts = 3
+)
+
 // Only applicable when SECURE_EMAIL_CHANGE_ENABLED
 const singleConfirmationAccepted = "Confirmation link accepted. Please proceed to confirm link sent to the other email"
 
@@ -723,6 +728,15 @@ func (a *API) verifyUserAndToken(conn *storage.Connection, params *VerifyParams,
 		return nil, apierrors.NewForbiddenError(apierrors.ErrorCodeUserBanned, "User is banned")
 	}
 
+	// OTP Protection: Check if token is invalidated before attempting verification
+	tokenType := getTokenTypeForVerification(params.Type)
+	if tokenType != "" {
+		invalidated, err := checkOTPTokenInvalidated(conn, user.ID.String(), tokenType)
+		if err == nil && invalidated {
+			return nil, apierrors.NewForbiddenError(apierrors.ErrorCodeOTPExpired, "Token has been invalidated due to too many failed attempts. Please request a new verification code.")
+		}
+	}
+
 	var isValid bool
 
 	smsProvider, _ := sms_provider.GetSmsProvider(*config)
@@ -770,6 +784,14 @@ func (a *API) verifyUserAndToken(conn *storage.Connection, params *VerifyParams,
 		isValid = isOtpValid(tokenHash, expectedToken, sentAt, config.Sms.OtpExp)
 	}
 
+	// OTP Protection: Record attempt
+	if tokenType != "" {
+		if err := recordOTPAttempt(conn, user.ID.String(), tokenType, isValid); err != nil {
+			// Log error but don't fail the request
+			logrus.WithError(err).Warn("Failed to record OTP attempt")
+		}
+	}
+
 	if !isValid {
 		return nil, apierrors.NewForbiddenError(apierrors.ErrorCodeOTPExpired, "Token has expired or is invalid").WithInternalMessage("token has expired or is invalid")
 	}
@@ -810,4 +832,93 @@ func emailAddressChanged(oldEmail, newEmail string) bool {
 // phoneNumberChanged checks if the phone number has changed, ensuring neither is empty
 func phoneNumberChanged(oldPhone, newPhone string) bool {
 	return oldPhone != "" && newPhone != "" && oldPhone != newPhone
+}
+
+// ============================================
+// OTP Brute Force Protection Functions
+// ============================================
+
+// getTokenTypeForVerification maps verification type to one_time_token type
+func getTokenTypeForVerification(verificationType string) string {
+	switch verificationType {
+	case mail.SignupVerification, mail.InviteVerification, mail.EmailOTPVerification:
+		return "confirmation_token"
+	case mail.RecoveryVerification, mail.MagicLinkVerification:
+		return "recovery_token"
+	case mail.EmailChangeVerification:
+		return "email_change_token_current"
+	case smsVerification:
+		return "phone_confirmation_token"
+	case phoneChangeVerification:
+		return "phone_change_token"
+	default:
+		return ""
+	}
+}
+
+// checkOTPTokenInvalidated checks if an OTP token has been invalidated due to too many failed attempts
+func checkOTPTokenInvalidated(conn *storage.Connection, userID string, tokenType string) (bool, error) {
+	var invalidatedAt *time.Time
+	err := conn.RawQuery(`
+		SELECT invalidated_at
+		FROM auth.one_time_tokens
+		WHERE user_id = $1 AND token_type = $2::auth.one_time_token_type
+	`, userID, tokenType).First(&invalidatedAt)
+
+	if err != nil {
+		if storage.IsNotFoundError(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	return invalidatedAt != nil, nil
+}
+
+// recordOTPAttempt records a failed OTP verification attempt and invalidates token after max failures
+func recordOTPAttempt(conn *storage.Connection, userID string, tokenType string, isValid bool) error {
+	// If token is valid, reset attempts
+	if isValid {
+		_, err := conn.RawQuery(`
+			UPDATE auth.one_time_tokens
+			SET attempt_count = 0, invalidated_at = NULL
+			WHERE user_id = $1 AND token_type = $2::auth.one_time_token_type
+		`, userID, tokenType).Exec()
+		return err
+	}
+
+	// Token is invalid - increment attempt count
+	var attemptCount int
+	err := conn.RawQuery(`
+		UPDATE auth.one_time_tokens
+		SET attempt_count = attempt_count + 1
+		WHERE user_id = $1 AND token_type = $2::auth.one_time_token_type
+		RETURNING attempt_count
+	`, userID, tokenType).First(&attemptCount)
+
+	if err != nil {
+		return err
+	}
+
+	// If max attempts reached, invalidate the token
+	if attemptCount >= maxOTPVerificationAttempts {
+		_, err = conn.RawQuery(`
+			UPDATE auth.one_time_tokens
+			SET invalidated_at = NOW()
+			WHERE user_id = $1 AND token_type = $2::auth.one_time_token_type
+		`, userID, tokenType).Exec()
+		return err
+	}
+
+	return nil
+}
+
+// clearOTPAttempts resets attempt tracking when a new OTP is generated
+func clearOTPAttempts(conn *storage.Connection, userID string, tokenType string) error {
+	_, err := conn.RawQuery(`
+		UPDATE auth.one_time_tokens
+		SET attempt_count = 0, invalidated_at = NULL
+		WHERE user_id = $1 AND token_type = $2::auth.one_time_token_type
+	`, userID, tokenType).Exec()
+	return err
 }
