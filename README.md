@@ -16,8 +16,63 @@ It is originally based on the excellent
 
 If you wish to contribute to the project, please refer to the [contributing guide](/CONTRIBUTING.md).
 
+---
+
+## Delos Fork
+
+This is a fork maintained by [Delos Intelligence](https://delos.so) with custom security enhancements. We maintain patched releases based on stable upstream versions.
+
+### Security Patches
+
+This fork includes **4 custom security patches**:
+
+1. **Timing Attack Prevention** - Bcrypt-based constant-time password verification to prevent user enumeration
+2. **Cache-Control Headers** - RFC 6749 compliant `Cache-Control: no-store` headers on all token endpoints
+3. **Require Current Password** - Optional protection against password changes via session hijacking
+4. **OTP Brute Force Protection** - Max 3 failed OTP attempts with automatic token invalidation
+
+### Branch Strategy
+
+- **`main`** - Tracks upstream/master (stable releases only)
+- **`delos-production`** - Rolling development with all patches
+- **`release/vX.Y.Z-delos`** - Stable release branches for production
+
+See [PR #3](../../pull/3) for a complete diff of all custom patches.
+
+### Docker Images
+
+Published to GitHub Container Registry:
+```
+ghcr.io/delos-intelligence/auth:v2.183.0-delos
+```
+
+### Release Workflow
+
+When Supabase releases a new version (e.g., v2.184.0):
+
+1. **Update main**: `git checkout main && git merge upstream/master`
+2. **Create release branch**: `git checkout -b release/v2.184.0-delos v2.184.0`
+3. **Cherry-pick patches** from `delos-production`
+4. **Run quality checks**: `make vet && make sec && make build`
+5. **Tag and push**: `git tag v2.184.0-delos && git push origin release/v2.184.0-delos v2.184.0-delos`
+6. **Build Docker image**: `docker build -t ghcr.io/delos-intelligence/auth:v2.184.0-delos .`
+7. **Deploy to staging** and test all security patches
+8. **Deploy to production**
+
+### Additional Configuration
+
+```bash
+# Require current password for password changes (default: false)
+GOTRUE_SECURITY_UPDATE_PASSWORD_REQUIRE_CURRENT_PASSWORD="true"
+```
+
+OTP brute force protection is always enabled (max 3 attempts, automatic token invalidation).
+
+---
+
 ## Table of Contents
 
+- [Delos Fork](#delos-fork)
 - [Quick Start](#quick-start)
 - [Running in Production](#running-in-production)
 - [Configuration](#configuration)
