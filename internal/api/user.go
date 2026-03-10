@@ -149,17 +149,31 @@ func (a *API) UserUpdate(w http.ResponseWriter, r *http.Request) error {
 
 	if params.Password != nil {
 		if config.Security.UpdatePasswordRequireCurrentPassword {
-			if params.CurrentPassword == nil || *params.CurrentPassword == "" {
-				return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Current password is required to update password")
+			// Recovery sessions (password reset flow) are exempt — the user
+			// cannot know their current password, that is why they are resetting it.
+			isRecoverySession := false
+			if session != nil {
+				for _, claim := range session.AMRClaims {
+					if claim.GetAuthenticationMethod() == models.Recovery.String() {
+						isRecoverySession = true
+						break
+					}
+				}
 			}
 
-			if user.HasPassword() {
-				authenticated, _, err := user.Authenticate(ctx, db, *params.CurrentPassword, config.Security.DBEncryption.DecryptionKeys, false, "")
-				if err != nil {
-					return apierrors.NewInternalServerError("Error verifying current password").WithInternalError(err)
+			if !isRecoverySession {
+				if params.CurrentPassword == nil || *params.CurrentPassword == "" {
+					return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Current password is required to update password")
 				}
-				if !authenticated {
-					return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, InvalidLoginMessage)
+
+				if user.HasPassword() {
+					authenticated, _, err := user.Authenticate(ctx, db, *params.CurrentPassword, config.Security.DBEncryption.DecryptionKeys, false, "")
+					if err != nil {
+						return apierrors.NewInternalServerError("Error verifying current password").WithInternalError(err)
+					}
+					if !authenticated {
+						return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, InvalidLoginMessage)
+					}
 				}
 			}
 		}
