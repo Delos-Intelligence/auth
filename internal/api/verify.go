@@ -300,10 +300,6 @@ func (a *API) verifyPost(w http.ResponseWriter, r *http.Request, params *VerifyP
 		if params.Type == mail.RecoveryVerification {
 			issuedAuthMethod = models.Recovery
 		}
-		logrus.WithFields(logrus.Fields{
-			"params_type":        params.Type,
-			"issued_auth_method": issuedAuthMethod.String(),
-		}).Info("[delos] verifyPost: issuing refresh token with auth method")
 		token, terr = a.issueRefreshToken(r, tx, user, issuedAuthMethod, grantParams)
 		if terr != nil {
 			return terr

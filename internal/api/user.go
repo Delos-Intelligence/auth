@@ -153,22 +153,12 @@ func (a *API) UserUpdate(w http.ResponseWriter, r *http.Request) error {
 			// cannot know their current password, that is why they are resetting it.
 			isRecoverySession := false
 			if session != nil {
-				amrMethods := []string{}
 				for _, claim := range session.AMRClaims {
-					amrMethods = append(amrMethods, claim.GetAuthenticationMethod())
 					if claim.GetAuthenticationMethod() == models.Recovery.String() {
 						isRecoverySession = true
 						break
 					}
 				}
-				logrus.WithFields(logrus.Fields{
-					"session_id":          session.ID,
-					"amr_methods":         amrMethods,
-					"amr_claims_count":    len(session.AMRClaims),
-					"is_recovery_session": isRecoverySession,
-				}).Info("[delos] password update: session AMR check")
-			} else {
-				logrus.Info("[delos] password update: session is nil")
 			}
 
 			if !isRecoverySession {
