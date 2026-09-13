@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   test_postgres:
+    if: github.repository == 'supabase/auth'
     name: Test / Postgres
     runs-on: blacksmith-4vcpu-ubuntu-2404
     services:
@@ -72,6 +73,7 @@ jobs:
           path-to-profile: coverage.out
 
   test_oriole:
+    if: github.repository == 'supabase/auth'
     name: Test / OrioleDB
     runs-on: blacksmith-4vcpu-ubuntu-2404
     services:
@@ -104,6 +106,7 @@ jobs:
         run: go test ./... -p 1 -race -v -count=1
 
   test_multigres:
+    if: github.repository == 'supabase/auth'
     name: Test / Multigres
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30

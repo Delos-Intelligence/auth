@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   release_please:
+    if: github.repository == 'supabase/auth'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write
@@ -221,7 +222,7 @@ jobs:
   publish:
     needs:
       - release_please
-    if: ${{ success() && needs.release_please.outputs.RELEASE_VERSION }}
+    if: ${{ github.repository == 'supabase/auth' && success() && needs.release_please.outputs.RELEASE_VERSION }}
     uses: ./.github/workflows/publish.yml
     secrets: inherit
     with:

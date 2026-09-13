@@ -1,4 +1,4 @@
-FROM golang:1.26.5-alpine3.23 as build
+FROM golang:1.26.8-alpine3.23 as build
 ENV GO111MODULE=on
 ENV CGO_ENABLED=0
 ENV GOOS=linux
@@ -15,8 +15,9 @@ RUN make deps
 # Building stuff
 COPY . /go/src/github.com/supabase/auth
 
-# Make sure you change the RELEASE_VERSION value before publishing an image.
-RUN RELEASE_VERSION=unspecified make build
+# Supply the version explicitly when building a Delos release.
+ARG RELEASE_VERSION=unspecified
+RUN RELEASE_VERSION=${RELEASE_VERSION} make build
 
 # Always use alpine:3 so the latest version is used. This will keep CA certs more up to date.
 FROM alpine:3
