@@ -751,6 +751,13 @@ func (ts *VerifyTestSuite) TestVerifyPKCEOTP() {
 			var buffer bytes.Buffer
 			// since the test user is the same, the tokens are being cleared after each successful verification attempt
 			// so we create them on each run
+			// Model the same user/token generation written by the issuance handlers.
+			if c.payload.Type == "signup" {
+				u.ConfirmationToken = c.payload.Token
+			} else {
+				u.RecoveryToken = c.payload.Token
+			}
+			require.NoError(ts.T(), ts.API.db.Update(u))
 			if c.payload.Type == "signup" {
 				require.NoError(ts.T(), models.CreateOneTimeToken(ts.API.db, u.ID, u.GetEmail(), c.payload.Token, models.ConfirmationToken))
 			} else if c.payload.Type == "magiclink" {

@@ -94,3 +94,7 @@ func retrieveRequestParams[A RequestParams](r *http.Request, params *A) error {
 	}
 	return nil
 }
+
+func sendTokenJSON(w http.ResponseWriter, status int, obj any) error {
+	return shared.SendTokenJSON(w, status, obj)
+}

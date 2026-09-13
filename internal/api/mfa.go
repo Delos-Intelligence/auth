@@ -722,7 +722,7 @@ func (a *API) verifyTOTPFactor(w http.ResponseWriter, r *http.Request, params *V
 		Provider: metering.ProviderMFATOTP,
 	})
 
-	return sendJSON(w, http.StatusOK, token)
+	return sendTokenJSON(w, http.StatusOK, token)
 
 }
 
@@ -863,7 +863,7 @@ func (a *API) verifyPhoneFactor(w http.ResponseWriter, r *http.Request, params *
 		Provider: metering.ProviderMFAPhone,
 	})
 
-	return sendJSON(w, http.StatusOK, token)
+	return sendTokenJSON(w, http.StatusOK, token)
 }
 
 func (a *API) verifyWebAuthnFactor(w http.ResponseWriter, r *http.Request, params *VerifyFactorParams) error {
@@ -983,7 +983,7 @@ func (a *API) verifyWebAuthnFactor(w http.ResponseWriter, r *http.Request, param
 		Provider: metering.ProviderMFAWebAuthn,
 	})
 
-	return sendJSON(w, http.StatusOK, token)
+	return sendTokenJSON(w, http.StatusOK, token)
 }
 
 func (a *API) VerifyFactor(w http.ResponseWriter, r *http.Request) error {

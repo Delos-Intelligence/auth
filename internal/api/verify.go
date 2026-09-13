@@ -14,6 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/supabase/auth/internal/api/apierrors"
 	"github.com/supabase/auth/internal/api/provider"
+	"github.com/supabase/auth/internal/api/shared"
 	"github.com/supabase/auth/internal/api/sms_provider"
 	"github.com/supabase/auth/internal/crypto"
 	mail "github.com/supabase/auth/internal/mailer"
@@ -93,6 +94,7 @@ func (p *VerifyParams) Validate(r *http.Request, a *API) error {
 
 // Verify exchanges a confirmation or recovery token to a refresh token
 func (a *API) Verify(w http.ResponseWriter, r *http.Request) error {
+	shared.SetTokenResponseHeaders(w)
 	params := &VerifyParams{}
 	switch r.Method {
 	case http.MethodGet:
@@ -182,7 +184,7 @@ func (a *API) verifyGet(w http.ResponseWriter, r *http.Request, params *VerifyPa
 		}
 
 		if isImplicitFlow(flowType) {
-			token, terr = a.issueRefreshToken(r, w.Header(), tx, user, models.OTP, grantParams)
+			token, terr = a.issueRefreshToken(r, w.Header(), tx, user, verificationAuthMethod(params.Type), grantParams)
 			if terr != nil {
 				return terr
 			}
@@ -282,12 +284,15 @@ func (a *API) verifyPost(w http.ResponseWriter, r *http.Request, params *VerifyP
 		if terr := tx.Reload(user); terr != nil {
 			return terr
 		}
-		token, terr = a.issueRefreshToken(r, w.Header(), tx, user, models.OTP, grantParams)
+		token, terr = a.issueRefreshToken(r, w.Header(), tx, user, verificationAuthMethod(params.Type), grantParams)
 		if terr != nil {
 			return terr
 		}
 		return nil
 	})
+	if committed, ok := err.(*storage.CommitWithError); ok {
+		return committed.Err
+	}
 	if err != nil {
 		return err
 	}
@@ -307,7 +312,7 @@ func (a *API) verifyPost(w http.ResponseWriter, r *http.Request, params *VerifyP
 		Provider: provider,
 	})
 
-	return sendJSON(w, http.StatusOK, token)
+	return sendTokenJSON(w, http.StatusOK, token)
 }
 
 func (a *API) signupVerify(r *http.Request, ctx context.Context, conn *storage.Connection, user *models.User) (*models.User, error) {
@@ -666,6 +671,9 @@ func (a *API) verifyTokenHash(conn *storage.Connection, params *VerifyParams) (*
 		return nil, apierrors.NewInternalServerError("Database error finding user from email link").WithInternalError(err)
 	}
 
+	if err := lockOTPUser(conn, user); err != nil {
+		return nil, err
+	}
 	if user.IsBanned() {
 		return nil, apierrors.NewForbiddenError(apierrors.ErrorCodeUserBanned, "User is banned")
 	}
@@ -692,12 +700,16 @@ func (a *API) verifyTokenHash(conn *storage.Connection, params *VerifyParams) (*
 		return nil, apierrors.NewForbiddenError(apierrors.ErrorCodeOTPExpired, "Email link is invalid or has expired").WithInternalMessage("email link has expired")
 	}
 
+	if err := a.checkOTPAttempts(conn, user, params, true); err != nil {
+		return nil, err
+	}
 	return user, nil
 }
 
 // verifyUserAndToken verifies the token associated to the user based on the verify type
 func (a *API) verifyUserAndToken(conn *storage.Connection, params *VerifyParams, aud string) (*models.User, error) {
 	config := a.config
+	originalParams := *params
 
 	var user *models.User
 	var err error
@@ -712,6 +724,9 @@ func (a *API) verifyUserAndToken(conn *storage.Connection, params *VerifyParams,
 		// Since the email change could be trigger via the implicit or PKCE flow,
 		// the query used has to also check if the token saved in the db contains the pkce_ prefix
 		user, err = models.FindUserForEmailChange(conn, params.Email, tokenHash, aud, config.Mailer.SecureEmailChangeEnabled)
+		if models.IsNotFoundError(err) {
+			user, err = findEmailChangeAttemptUser(conn, params.Email, aud, config.Mailer.SecureEmailChangeEnabled)
+		}
 	default:
 		user, err = models.FindUserByEmailAndAudience(conn, params.Email, aud)
 	}
@@ -723,6 +738,9 @@ func (a *API) verifyUserAndToken(conn *storage.Connection, params *VerifyParams,
 		return nil, apierrors.NewInternalServerError("Database error finding user").WithInternalError(err)
 	}
 
+	if err := lockOTPUser(conn, user); err != nil {
+		return nil, err
+	}
 	if user.IsBanned() {
 		return nil, apierrors.NewForbiddenError(apierrors.ErrorCodeUserBanned, "User is banned")
 	}
@@ -774,6 +792,9 @@ func (a *API) verifyUserAndToken(conn *storage.Connection, params *VerifyParams,
 		isValid = isOtpValid(tokenHash, expectedToken, sentAt, config.Sms.OtpExp)
 	}
 
+	if err := a.checkOTPAttempts(conn, user, &originalParams, isValid); err != nil {
+		return nil, err
+	}
 	if !isValid {
 		return nil, apierrors.NewForbiddenError(apierrors.ErrorCodeOTPExpired, "Token has expired or is invalid").WithInternalMessage("token has expired or is invalid")
 	}
@@ -814,4 +835,11 @@ func emailAddressChanged(oldEmail, newEmail string) bool {
 // phoneNumberChanged checks if the phone number has changed, ensuring neither is empty
 func phoneNumberChanged(oldPhone, newPhone string) bool {
 	return oldPhone != "" && newPhone != "" && oldPhone != newPhone
+}
+
+func verificationAuthMethod(verificationType string) models.AuthenticationMethod {
+	if verificationType == mail.RecoveryVerification {
+		return models.Recovery
+	}
+	return models.OTP
 }

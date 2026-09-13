@@ -423,16 +423,16 @@ func (ts *UserTestSuite) TestUserUpdatePasswordViaRecovery() {
 		expected        expected
 	}{
 		{
-			desc:         "Current password not required in OTP recovery flow",
+			desc:         "Delos: ordinary OTP requires current password",
 			newPassword:  "newpassword123",
 			recoveryType: models.OTP,
-			expected:     expected{code: http.StatusOK, isAuthenticated: true},
+			expected:     expected{code: http.StatusBadRequest, isAuthenticated: false},
 		},
 		{
-			desc:         "Current password not required in magiclink recovery flow",
+			desc:         "Delos: ordinary magiclink requires current password",
 			newPassword:  "newpassword456",
 			recoveryType: models.MagicLink,
-			expected:     expected{code: http.StatusOK, isAuthenticated: true},
+			expected:     expected{code: http.StatusBadRequest, isAuthenticated: false},
 		},
 		{
 			desc:         "Current password not required in PKCE recovery flow",

@@ -263,6 +263,7 @@ type OAuthTokenParams struct {
 
 // OAuthToken handles POST /oauth/token
 func (s *Server) OAuthToken(w http.ResponseWriter, r *http.Request) error {
+	shared.SetTokenResponseHeaders(w)
 	ctx := r.Context()
 
 	var params OAuthTokenParams
@@ -472,7 +473,7 @@ func (s *Server) handleAuthorizationCodeGrant(ctx context.Context, w http.Respon
 		oauthResponse["id_token"] = tokenResponse.IDToken
 	}
 
-	return shared.SendJSON(w, http.StatusOK, oauthResponse)
+	return shared.SendTokenJSON(w, http.StatusOK, oauthResponse)
 }
 
 // handleRefreshTokenGrant handles the refresh_token grant type
@@ -510,7 +511,7 @@ func (s *Server) handleRefreshTokenGrant(ctx context.Context, w http.ResponseWri
 		"refresh_token": tokenResponse.RefreshToken,
 	}
 
-	return shared.SendJSON(w, http.StatusOK, oauthResponse)
+	return shared.SendTokenJSON(w, http.StatusOK, oauthResponse)
 }
 
 // getTokenService retrieves the token service from the server

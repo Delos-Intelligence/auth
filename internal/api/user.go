@@ -151,6 +151,11 @@ func (a *API) UserUpdate(w http.ResponseWriter, r *http.Request) error {
 	addingFirstPassword := params.Password != nil && *params.Password != "" && !user.HasPassword()
 
 	if params.Password != nil {
+		// Preserve the existing Delos contract for first-password requests too.
+		if config.Security.UpdatePasswordRequireCurrentPassword && !isPasswordRecoverySession(session) &&
+			(params.CurrentPassword == nil || *params.CurrentPassword == "") {
+			return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Current password is required to update password")
+		}
 		if config.Security.UpdatePasswordRequireReauthentication {
 			now := time.Now()
 			// we require reauthentication if the user hasn't signed in recently in the current session
@@ -172,16 +177,16 @@ func (a *API) UserUpdate(w http.ResponseWriter, r *http.Request) error {
 				// current password required when updating password
 				if config.Security.UpdatePasswordRequireCurrentPassword {
 					// ensure user is not in a password recovery flow
-					if !session.IsRecovery() {
+					if !isPasswordRecoverySession(session) {
 						if params.CurrentPassword == nil || *params.CurrentPassword == "" {
-							return apierrors.NewBadRequestError(apierrors.ErrorCodeCurrentPasswordRequired, "Current password required when setting new password.")
+							return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Current password is required to update password")
 						}
 						isCurrentPasswordCorrect, _, err := user.Authenticate(ctx, db, *params.CurrentPassword, config.Security.DBEncryption.DecryptionKeys, false, "")
 						if err != nil {
 							return err
 						}
 						if !isCurrentPasswordCorrect {
-							return apierrors.NewBadRequestError(apierrors.ErrorCodeCurrentPasswordMismatch, "Current password required when setting new password.")
+							return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, InvalidLoginMessage)
 						}
 					}
 				}
@@ -302,4 +307,18 @@ func (a *API) UserUpdate(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	return sendJSON(w, http.StatusOK, user)
+}
+
+// Delos exempts explicit password recovery, not ordinary OTP or magic-link login.
+// Keep this local: upstream Session.IsRecovery has broader uses and semantics.
+func isPasswordRecoverySession(session *models.Session) bool {
+	if session == nil {
+		return false
+	}
+	for _, claim := range session.AMRClaims {
+		if claim.GetAuthenticationMethod() == models.Recovery.String() {
+			return true
+		}
+	}
+	return false
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/gofrs/uuid"
 
 	"github.com/supabase/auth/internal/api/apierrors"
+	"github.com/supabase/auth/internal/api/shared"
 	"github.com/supabase/auth/internal/crypto"
 	"github.com/supabase/auth/internal/hooks/v0hooks"
 	"github.com/supabase/auth/internal/metering"
@@ -36,8 +37,18 @@ type PKCEGrantParams struct {
 const useCookieHeader = "x-use-cookie"
 const InvalidLoginMessage = "Invalid login credentials"
 
+// #nosec G101 -- Non-secret comparison hash; never used to authenticate an account.
+const dummyPasswordHash = "$2a$10$JUbiChr4qVqzEEHDLbRmgOvGTUajEl0g6JJjOzN.drbF9oX.iL/sq"
+
+// performDummyPasswordVerification reduces the timing gap for missing accounts
+// and accounts without passwords. It does not equalize all authentication paths.
+func (a *API) performDummyPasswordVerification(ctx context.Context, password string) {
+	_ = crypto.CompareHashAndPassword(ctx, dummyPasswordHash, password)
+}
+
 // Token is the endpoint for OAuth access token requests
 func (a *API) Token(w http.ResponseWriter, r *http.Request) error {
+	shared.SetTokenResponseHeaders(w)
 	ctx := r.Context()
 	grantType := r.FormValue("grant_type")
 
@@ -108,12 +119,14 @@ func (a *API) ResourceOwnerPasswordGrant(ctx context.Context, w http.ResponseWri
 
 	if err != nil {
 		if models.IsNotFoundError(err) {
+			a.performDummyPasswordVerification(ctx, params.Password)
 			return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, InvalidLoginMessage)
 		}
 		return apierrors.NewInternalServerError("Database error querying schema").WithInternalError(err)
 	}
 
 	if !user.HasPassword() {
+		a.performDummyPasswordVerification(ctx, params.Password)
 		return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, InvalidLoginMessage)
 	}
 
@@ -208,7 +221,7 @@ func (a *API) ResourceOwnerPasswordGrant(ctx context.Context, w http.ResponseWri
 	metering.RecordLogin(metering.LoginTypePassword, user.ID, &metering.LoginData{
 		Provider: provider,
 	})
-	return sendJSON(w, http.StatusOK, token)
+	return sendTokenJSON(w, http.StatusOK, token)
 }
 
 func (a *API) PKCE(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
@@ -285,7 +298,7 @@ func (a *API) PKCE(ctx context.Context, w http.ResponseWriter, r *http.Request) 
 	metering.RecordLogin(metering.LoginTypePKCE, user.ID, &metering.LoginData{
 		Provider: flowState.ProviderType,
 	})
-	return sendJSON(w, http.StatusOK, token)
+	return sendTokenJSON(w, http.StatusOK, token)
 }
 
 func (a *API) generateAccessToken(r *http.Request, tx *storage.Connection, user *models.User, sessionId *uuid.UUID, authenticationMethod models.AuthenticationMethod) (string, int64, error) {
