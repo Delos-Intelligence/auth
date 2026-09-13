@@ -7,6 +7,7 @@ import (
 	"github.com/gofrs/uuid"
 
 	"github.com/supabase/auth/internal/api/apierrors"
+	"github.com/supabase/auth/internal/api/shared"
 	"github.com/supabase/auth/internal/crypto"
 	"github.com/supabase/auth/internal/hooks/v0hooks"
 	"github.com/supabase/auth/internal/metering"
@@ -36,16 +37,18 @@ type PKCEGrantParams struct {
 const useCookieHeader = "x-use-cookie"
 const InvalidLoginMessage = "Invalid login credentials"
 
+// #nosec G101 -- Non-secret comparison hash; never used to authenticate an account.
 const dummyPasswordHash = "$2a$10$JUbiChr4qVqzEEHDLbRmgOvGTUajEl0g6JJjOzN.drbF9oX.iL/sq"
 
-// performDummyPasswordVerification prevents user enumeration via timing attacks
-// by performing a bcrypt comparison even when user is not found
+// performDummyPasswordVerification reduces the timing gap for missing accounts
+// and accounts without passwords. It does not equalize all authentication paths.
 func (a *API) performDummyPasswordVerification(ctx context.Context, password string) {
 	_ = crypto.CompareHashAndPassword(ctx, dummyPasswordHash, password)
 }
 
 // Token is the endpoint for OAuth access token requests
 func (a *API) Token(w http.ResponseWriter, r *http.Request) error {
+	shared.SetTokenResponseHeaders(w)
 	ctx := r.Context()
 	grantType := r.FormValue("grant_type")
 
@@ -98,13 +101,13 @@ func (a *API) ResourceOwnerPasswordGrant(ctx context.Context, w http.ResponseWri
 	grantParams.FillGrantParams(r)
 
 	if params.Email != "" {
-		provider = "email"
+		provider = EmailProvider
 		if !config.External.Email.Enabled {
 			return apierrors.NewUnprocessableEntityError(apierrors.ErrorCodeEmailProviderDisabled, "Email logins are disabled")
 		}
 		user, err = models.FindUserByEmailAndAudience(db, params.Email, aud)
 	} else if params.Phone != "" {
-		provider = "phone"
+		provider = PhoneProvider
 		if !config.External.Phone.Enabled {
 			return apierrors.NewUnprocessableEntityError(apierrors.ErrorCodePhoneProviderDisabled, "Phone logins are disabled")
 		}
@@ -162,12 +165,13 @@ func (a *API) ResourceOwnerPasswordGrant(ctx context.Context, w http.ResponseWri
 	}
 
 	if config.Hook.PasswordVerificationAttempt.Enabled {
-		input := v0hooks.PasswordVerificationAttemptInput{
-			UserID: user.ID,
-			Valid:  isValidPassword,
-		}
+		input := v0hooks.NewPasswordVerificationAttemptInput(
+			r,
+			user.ID,
+			isValidPassword,
+		)
 		output := v0hooks.PasswordVerificationAttemptOutput{}
-		if err := a.hooksMgr.InvokeHook(nil, r, &input, &output); err != nil {
+		if err := a.hooksMgr.InvokeHook(nil, r, input, &output); err != nil {
 			return err
 		}
 
@@ -180,7 +184,7 @@ func (a *API) ResourceOwnerPasswordGrant(ctx context.Context, w http.ResponseWri
 					return err
 				}
 			}
-			return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, output.Message)
+			return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, "%s", output.Message)
 		}
 	}
 	if !isValidPassword {
@@ -256,7 +260,7 @@ func (a *API) PKCE(ctx context.Context, w http.ResponseWriter, r *http.Request) 
 		return err
 	}
 	if err := flowState.VerifyPKCE(params.CodeVerifier); err != nil {
-		return apierrors.NewBadRequestError(apierrors.ErrorCodeBadCodeVerifier, err.Error())
+		return apierrors.NewBadRequestError(apierrors.ErrorCodeBadCodeVerifier, "%s", err.Error())
 	}
 
 	var token *AccessTokenResponse
@@ -283,7 +287,7 @@ func (a *API) PKCE(ctx context.Context, w http.ResponseWriter, r *http.Request) 
 			token.ProviderRefreshToken = flowState.ProviderRefreshToken
 		}
 		if terr = tx.Destroy(flowState); terr != nil {
-			return err
+			return terr
 		}
 		return nil
 	})
@@ -305,8 +309,8 @@ func (a *API) generateAccessToken(r *http.Request, tx *storage.Connection, user 
 	})
 }
 
-func (a *API) issueRefreshToken(r *http.Request, conn *storage.Connection, user *models.User, authenticationMethod models.AuthenticationMethod, grantParams models.GrantParams) (*tokens.AccessTokenResponse, error) {
-	return a.tokenService.IssueRefreshToken(r, make(http.Header), conn, user, authenticationMethod, grantParams)
+func (a *API) issueRefreshToken(r *http.Request, headers http.Header, conn *storage.Connection, user *models.User, authenticationMethod models.AuthenticationMethod, grantParams models.GrantParams) (*tokens.AccessTokenResponse, error) {
+	return a.tokenService.IssueRefreshToken(r, headers, conn, user, authenticationMethod, grantParams)
 }
 
 func (a *API) updateMFASessionAndClaims(r *http.Request, tx *storage.Connection, user *models.User, authenticationMethod models.AuthenticationMethod, grantParams models.GrantParams) (*tokens.AccessTokenResponse, error) {
@@ -343,7 +347,13 @@ func (a *API) updateMFASessionAndClaims(r *http.Request, tx *storage.Connection,
 				return apierrors.NewInternalServerError("Failed to get session's refresh token key").WithInternalError(terr)
 			}
 
-			counter := *session.RefreshTokenCounter + 1
+			// Incrementing the refresh token counter by 2 here is
+			// counter intuitive, but is important for security. It
+			// means that the previous refresh token (issued with
+			// AAL1) will no longer be able to issue AAL2 sessions.
+			// It forces the client to have received the refresh
+			// token from the MFA verification flow.
+			counter := *session.RefreshTokenCounter + 2
 			session.RefreshTokenCounter = &counter
 
 			issuedRefreshToken = (&crypto.RefreshToken{
@@ -401,7 +411,7 @@ func (a *API) updateMFASessionAndClaims(r *http.Request, tx *storage.Connection,
 	return &tokens.AccessTokenResponse{
 		Token:        tokenString,
 		TokenType:    "bearer",
-		ExpiresIn:    config.JWT.Exp,
+		ExpiresIn:    int(expiresAt - a.Now().Unix()),
 		ExpiresAt:    expiresAt,
 		RefreshToken: issuedRefreshToken,
 		User:         user,

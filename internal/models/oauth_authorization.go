@@ -252,6 +252,23 @@ func FindOAuthServerAuthorizationByID(tx *storage.Connection, authorizationID st
 	return auth, nil
 }
 
+// FindOAuthServerAuthorizationByIDForUpdate finds an OAuth authorization by
+// authorization_id and locks the row with FOR UPDATE SKIP LOCKED.
+// Must be called inside a transaction.
+func FindOAuthServerAuthorizationByIDForUpdate(tx *storage.Connection, authorizationID string) (*OAuthServerAuthorization, error) {
+	auth := &OAuthServerAuthorization{}
+	if err := tx.RawQuery(
+		fmt.Sprintf("SELECT * FROM %q WHERE authorization_id = ? LIMIT 1 FOR UPDATE SKIP LOCKED", auth.TableName()),
+		authorizationID,
+	).First(auth); err != nil {
+		if errors.Cause(err) == sql.ErrNoRows {
+			return nil, OAuthServerAuthorizationNotFoundError{}
+		}
+		return nil, errors.Wrap(err, "error finding OAuth authorization")
+	}
+	return auth, nil
+}
+
 // FindOAuthServerAuthorizationByCode finds an OAuth authorization by authorization code
 func FindOAuthServerAuthorizationByCode(tx *storage.Connection, code string) (*OAuthServerAuthorization, error) {
 	auth := &OAuthServerAuthorization{}
@@ -302,4 +319,8 @@ type OAuthServerAuthorizationNotFoundError struct{}
 
 func (e OAuthServerAuthorizationNotFoundError) Error() string {
 	return "OAuth authorization not found"
+}
+
+func (e OAuthServerAuthorizationNotFoundError) Is(target error) bool {
+	return target == errNotFound
 }

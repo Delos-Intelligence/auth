@@ -2,6 +2,7 @@ package observability
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/supabase/auth/internal/conf"
+	"github.com/supabase/auth/internal/utilities"
+	"github.com/supabase/auth/internal/utilities/version"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
@@ -45,9 +48,9 @@ func enablePrometheusMetrics(ctx context.Context, mc *conf.MetricsConfig) error 
 	otel.SetMeterProvider(provider)
 
 	cleanupWaitGroup.Add(1)
-	go func() {
+	go func() { // #nosec G118 -- Cleanup goroutine intentionally manages server lifecycle independent of request context.
 		addr := net.JoinHostPort(mc.PrometheusListenHost, mc.PrometheusListenPort)
-		baseContext, cancel := context.WithCancel(context.Background())
+		baseContext, cancel := context.WithCancel(context.Background()) // #nosec G118 -- cancel() is called in the shutdown goroutine below; baseContext is for the HTTP server.
 
 		server := &http.Server{
 			Addr:    addr,
@@ -67,17 +70,17 @@ func enablePrometheusMetrics(ctx context.Context, mc *conf.MetricsConfig) error 
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer shutdownCancel()
 
-			if err := server.Shutdown(shutdownCtx); err != nil {
+			if err := server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
 				logrus.WithError(err).Errorf("prometheus server (%s) failed to gracefully shut down", addr)
 			}
 		}()
 
 		logrus.Infof("prometheus server listening on %s", addr)
 
-		if err := server.ListenAndServe(); err != nil {
-			logrus.WithError(err).Errorf("prometheus server (%s) shut down", addr)
-		} else {
+		if err := server.ListenAndServe(); errors.Is(err, http.ErrServerClosed) {
 			logrus.Info("prometheus metric exporter shut down")
+		} else {
+			logrus.WithError(err).Errorf("prometheus server (%s) shut down", addr)
 		}
 	}()
 
@@ -98,7 +101,7 @@ func enableOpenTelemetryMetrics(ctx context.Context, mc *conf.MetricsConfig) err
 		otel.SetMeterProvider(meterProvider)
 
 		cleanupWaitGroup.Add(1)
-		go func() {
+		go func() { // #nosec G118 -- Cleanup goroutine intentionally outlives the request; context.Background() is required for shutdown after parent context is cancelled.
 			defer cleanupWaitGroup.Done()
 
 			<-ctx.Done()
@@ -125,7 +128,7 @@ func enableOpenTelemetryMetrics(ctx context.Context, mc *conf.MetricsConfig) err
 		otel.SetMeterProvider(meterProvider)
 
 		cleanupWaitGroup.Add(1)
-		go func() {
+		go func() { // #nosec G118 -- Cleanup goroutine intentionally outlives the request; context.Background() is required for shutdown after parent context is cancelled.
 			defer cleanupWaitGroup.Done()
 
 			<-ctx.Done()
@@ -195,6 +198,9 @@ func ConfigureMetrics(ctx context.Context, mc *conf.MetricsConfig) error {
 		if err != nil {
 			logrus.WithError(err).Error("unable to get gotrue.gotrue_running gague metric")
 			return
+		}
+		if err = version.InitVersionMetrics(ctx, utilities.Version); err != nil {
+			logrus.WithError(err).Error("unable to configure version metrics")
 		}
 	})
 

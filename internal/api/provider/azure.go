@@ -36,6 +36,8 @@ type azureProvider struct {
 	// ID token received is issued by that specific issuer, and so
 	// ExpectedIssuer contains the issuer URL of that tenant.
 	ExpectedIssuer string
+
+	cache *OIDCProviderCache
 }
 
 var azureIssuerRegexp = regexp.MustCompile("^https://login[.]microsoftonline[.]com/([^/]+)/v2[.]0/?$")
@@ -50,7 +52,7 @@ func IsAzureCIAMIssuer(issuer string) bool {
 }
 
 // NewAzureProvider creates a Azure account provider.
-func NewAzureProvider(ext conf.OAuthProviderConfiguration, scopes string) (OAuthProvider, error) {
+func NewAzureProvider(ext conf.OAuthProviderConfiguration, scopes string, cache *OIDCProviderCache) (OAuthProvider, error) {
 	if err := ext.ValidateOAuth(); err != nil {
 		return nil, err
 	}
@@ -67,7 +69,7 @@ func NewAzureProvider(ext conf.OAuthProviderConfiguration, scopes string) (OAuth
 	if ext.URL != "" {
 		expectedIssuer = authHost + "/v2.0"
 
-		if !IsAzureIssuer(expectedIssuer) || !IsAzureCIAMIssuer(expectedIssuer) || expectedIssuer == IssuerAzureCommon || expectedIssuer == IssuerAzureOrganizations {
+		if (!IsAzureIssuer(expectedIssuer) && !IsAzureCIAMIssuer(expectedIssuer)) || expectedIssuer == IssuerAzureCommon || expectedIssuer == IssuerAzureOrganizations {
 			// in tests, the URL is a local server which should not
 			// be the expected issuer
 			// also, IssuerAzure (common) never actually issues any
@@ -88,6 +90,7 @@ func NewAzureProvider(ext conf.OAuthProviderConfiguration, scopes string) (OAuth
 			Scopes:      oauthScopes,
 		},
 		ExpectedIssuer: expectedIssuer,
+		cache:          cache,
 	}, nil
 }
 
@@ -145,7 +148,7 @@ func (g azureProvider) GetUserData(ctx context.Context, tok *oauth2.Token) (*Use
 			return nil, fmt.Errorf("azure: ID token issuer %q does not match expected issuer %q", issuer, g.ExpectedIssuer)
 		}
 
-		provider, err := oidc.NewProvider(ctx, issuer)
+		provider, err := g.cache.GetProvider(ctx, issuer)
 		if err != nil {
 			return nil, err
 		}

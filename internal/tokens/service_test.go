@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/supabase/auth/internal/conf"
+	"github.com/supabase/auth/internal/conf/confload"
 	"github.com/supabase/auth/internal/crypto"
 	"github.com/supabase/auth/internal/models"
 	"github.com/supabase/auth/internal/storage"
@@ -59,7 +62,7 @@ func (ts *RefreshTokenV2Suite) SetupTest() {
 }
 
 func (ts *RefreshTokenV2Suite) config() *conf.GlobalConfiguration {
-	config, err := conf.LoadGlobal("../../hack/test.env")
+	config, err := confload.LoadGlobal("../../hack/test.env")
 	if err != nil {
 		panic("failed to load config")
 	}
@@ -147,6 +150,41 @@ func (ts *RefreshTokenV2Suite) TestNormalUse() {
 
 		refreshTokenToUse = nrt.RefreshToken
 	}
+}
+
+func (ts *RefreshTokenV2Suite) TestUpdatesLastSignInAt() {
+	config := ts.config()
+	require.Equal(ts.T(), 2, config.Security.RefreshTokenAlgorithmVersion)
+
+	require.Nil(ts.T(), ts.User.LastSignInAt)
+
+	clock := time.Now()
+
+	srv := NewService(config, &panicHookManager{})
+	srv.SetTimeFunc(func() time.Time {
+		return clock
+	})
+
+	req, err := http.NewRequest("POST", "https://example.com/", nil)
+	require.NoError(ts.T(), err)
+
+	req = req.WithContext(context.Background())
+	responseHeaders := make(http.Header)
+
+	_, err = srv.IssueRefreshToken(
+		req,
+		responseHeaders,
+		ts.Conn,
+		ts.User,
+		models.PasswordGrant,
+		models.GrantParams{},
+	)
+	require.NoError(ts.T(), err)
+
+	dbUser, err := models.FindUserByID(ts.Conn, ts.User.ID)
+	require.NoError(ts.T(), err)
+	require.NotNil(ts.T(), dbUser.LastSignInAt)
+	require.WithinDuration(ts.T(), clock, *dbUser.LastSignInAt, time.Second)
 }
 
 func (ts *RefreshTokenV2Suite) TestMaliciousReuse() {
@@ -777,7 +815,7 @@ func parseIDTokenClaims(idToken string, config *conf.GlobalConfiguration) (jwt.M
 		if kid, ok := token.Header["kid"]; ok {
 			if kidStr, ok := kid.(string); ok {
 				// Find the public key by kid for asymmetric verification
-				key, err := conf.FindPublicKeyByKid(kidStr, &config.JWT)
+				key, err := conf.FindPublicKeyByKid(context.Background(), kidStr, &config.JWT)
 				if err != nil {
 					return nil, err
 				}
@@ -804,7 +842,7 @@ type IDTokenTestSuite struct {
 func TestIDTokenGeneration(t *testing.T) {
 	ts := &IDTokenTestSuite{}
 
-	config, err := conf.LoadGlobal("../../hack/test_asymmetric.env")
+	config, err := confload.LoadGlobal("../../hack/test_asymmetric.env")
 	require.NoError(t, err)
 
 	conn, err := test.SetupDBConnection(config)
@@ -849,7 +887,7 @@ func (ts *IDTokenTestSuite) TestIDTokenWithAllScopes() {
 		Scopes:   []string{models.ScopeOpenID, models.ScopeEmail, models.ScopeProfile, models.ScopePhone},
 	}
 
-	idToken, err := srv.GenerateIDToken(params)
+	idToken, err := srv.GenerateIDToken(context.Background(), params)
 	require.NoError(ts.T(), err)
 	require.NotEmpty(ts.T(), idToken)
 
@@ -880,7 +918,7 @@ func (ts *IDTokenTestSuite) TestIDTokenWithOnlyOpenIDScope() {
 		Scopes:   []string{models.ScopeOpenID},
 	}
 
-	idToken, err := srv.GenerateIDToken(params)
+	idToken, err := srv.GenerateIDToken(context.Background(), params)
 	require.NoError(ts.T(), err)
 	require.NotEmpty(ts.T(), idToken)
 
@@ -913,7 +951,7 @@ func (ts *IDTokenTestSuite) TestIDTokenWithEmailScope() {
 		Scopes:   []string{models.ScopeOpenID, models.ScopeEmail},
 	}
 
-	idToken, err := srv.GenerateIDToken(params)
+	idToken, err := srv.GenerateIDToken(context.Background(), params)
 	require.NoError(ts.T(), err)
 	require.NotEmpty(ts.T(), idToken)
 
@@ -943,7 +981,7 @@ func (ts *IDTokenTestSuite) TestIDTokenWithProfileScope() {
 		Scopes:   []string{models.ScopeOpenID, models.ScopeProfile},
 	}
 
-	idToken, err := srv.GenerateIDToken(params)
+	idToken, err := srv.GenerateIDToken(context.Background(), params)
 	require.NoError(ts.T(), err)
 	require.NotEmpty(ts.T(), idToken)
 
@@ -973,7 +1011,7 @@ func (ts *IDTokenTestSuite) TestIDTokenWithPhoneScope() {
 		Scopes:   []string{models.ScopeOpenID, models.ScopePhone},
 	}
 
-	idToken, err := srv.GenerateIDToken(params)
+	idToken, err := srv.GenerateIDToken(context.Background(), params)
 	require.NoError(ts.T(), err)
 	require.NotEmpty(ts.T(), idToken)
 
@@ -1003,7 +1041,7 @@ func (ts *IDTokenTestSuite) TestIDTokenWithMultipleScopes() {
 		Scopes:   []string{models.ScopeOpenID, models.ScopeEmail, models.ScopeProfile},
 	}
 
-	idToken, err := srv.GenerateIDToken(params)
+	idToken, err := srv.GenerateIDToken(context.Background(), params)
 	require.NoError(ts.T(), err)
 	require.NotEmpty(ts.T(), idToken)
 
@@ -1021,4 +1059,283 @@ func (ts *IDTokenTestSuite) TestIDTokenWithMultipleScopes() {
 	// Should NOT have phone claims
 	phoneNumber, hasPhone := claims["phone_number"]
 	require.False(ts.T(), hasPhone || (phoneNumber != nil && phoneNumber != ""), "phone_number claim should not be present without phone scope")
+}
+
+func TestAMRClaimUnmarshal(t *testing.T) {
+	t.Run("mixed string and object formats", func(t *testing.T) {
+		var claim AMRClaim
+		before := time.Now().Unix()
+
+		err := json.Unmarshal([]byte(`["password", {"method":"totp","timestamp":123,"provider":"webauthn"}]`), &claim)
+		require.NoError(t, err)
+		require.Len(t, claim, 2)
+
+		require.Equal(t, "password", claim[0].Method)
+		require.GreaterOrEqual(t, claim[0].Timestamp, before)
+		require.LessOrEqual(t, claim[0].Timestamp, time.Now().Unix())
+		require.Empty(t, claim[0].Provider, "string format should not have provider")
+
+		require.Equal(t, "totp", claim[1].Method)
+		require.Equal(t, int64(123), claim[1].Timestamp)
+		require.Equal(t, "webauthn", claim[1].Provider, "provider should be preserved from object format")
+	})
+
+	t.Run("object with provider", func(t *testing.T) {
+		var claim AMRClaim
+		err := json.Unmarshal([]byte(`[{"method":"sso","timestamp":456,"provider":"saml"}]`), &claim)
+		require.NoError(t, err)
+		require.Len(t, claim, 1)
+		require.Equal(t, "sso", claim[0].Method)
+		require.Equal(t, int64(456), claim[0].Timestamp)
+		require.Equal(t, "saml", claim[0].Provider, "provider should be preserved")
+	})
+
+	t.Run("object without provider", func(t *testing.T) {
+		var claim AMRClaim
+		err := json.Unmarshal([]byte(`[{"method":"password","timestamp":789}]`), &claim)
+		require.NoError(t, err)
+		require.Len(t, claim, 1)
+		require.Equal(t, "password", claim[0].Method)
+		require.Equal(t, int64(789), claim[0].Timestamp)
+		require.Empty(t, claim[0].Provider, "provider should be empty when not provided")
+	})
+
+	t.Run("all strings", func(t *testing.T) {
+		var claim AMRClaim
+		before := time.Now().Unix()
+		err := json.Unmarshal([]byte(`["password", "totp"]`), &claim)
+		require.NoError(t, err)
+		require.Len(t, claim, 2)
+		require.Equal(t, "password", claim[0].Method)
+		require.Equal(t, "totp", claim[1].Method)
+		require.GreaterOrEqual(t, claim[0].Timestamp, before)
+		require.Empty(t, claim[0].Provider)
+		require.Empty(t, claim[1].Provider)
+	})
+
+	t.Run("all objects", func(t *testing.T) {
+		var claim AMRClaim
+		err := json.Unmarshal([]byte(`[{"method":"password","timestamp":100},{"method":"totp","timestamp":200,"provider":"webauthn"}]`), &claim)
+		require.NoError(t, err)
+		require.Len(t, claim, 2)
+		require.Equal(t, "password", claim[0].Method)
+		require.Equal(t, int64(100), claim[0].Timestamp)
+		require.Empty(t, claim[0].Provider)
+		require.Equal(t, "totp", claim[1].Method)
+		require.Equal(t, int64(200), claim[1].Timestamp)
+		require.Equal(t, "webauthn", claim[1].Provider, "provider should be preserved")
+	})
+}
+
+func (ts *RefreshTokenV2Suite) TestRefreshTokenVersionUpgrade() {
+	config := ts.config()
+
+	require.Equal(ts.T(), 2, config.Security.RefreshTokenAlgorithmVersion)
+
+	// start out with version 1, to issue a session with the old refresh tokens
+	// which then will be upgraded to the new one
+	config.Security.RefreshTokenAlgorithmVersion = 1
+	config.Security.RefreshTokenRotationEnabled = false
+	config.Security.RefreshTokenReuseInterval = 1
+	config.Security.RefreshTokenAllowReuse = false
+
+	clock := time.Now()
+
+	srv := NewService(config, &panicHookManager{})
+	srv.SetTimeFunc(func() time.Time {
+		return clock
+	})
+
+	req, err := http.NewRequest("POST", "https://example.com/", nil)
+	require.NoError(ts.T(), err)
+
+	req = req.WithContext(context.Background())
+	responseHeaders := make(http.Header)
+
+	at, err := srv.IssueRefreshToken(
+		req,
+		responseHeaders,
+		ts.Conn,
+		ts.User,
+		models.PasswordGrant,
+		models.GrantParams{},
+	)
+	require.NoError(ts.T(), err)
+	require.NotNil(ts.T(), at)
+
+	refreshTokenToUse := at.RefreshToken
+
+	// now set the algorithm to 2 and start upgrading
+	config.Security.RefreshTokenAlgorithmVersion = 2
+	config.Security.RefreshTokenUpgradePercentage = 100
+
+	clock = clock.Add(time.Duration(config.Security.RefreshTokenReuseInterval)*time.Second + time.Duration(100)*time.Millisecond)
+	responseHeaders = make(http.Header)
+
+	nrt, err := srv.RefreshTokenGrant(context.Background(), ts.Conn, req, responseHeaders, RefreshTokenGrantParams{
+		RefreshToken: refreshTokenToUse,
+	})
+	require.NoError(ts.T(), err)
+
+	pnrt, err := crypto.ParseRefreshToken(nrt.RefreshToken)
+	require.NoError(ts.T(), err)
+	require.NotNil(ts.T(), pnrt)
+	require.Equal(ts.T(), int64(0), pnrt.Counter)
+
+	refreshedSession, err := models.FindSessionByID(ts.Conn, pnrt.SessionID, false)
+	require.NoError(ts.T(), err)
+	require.NotNil(ts.T(), refreshedSession.RefreshTokenCounter)
+	require.NotNil(ts.T(), refreshedSession.RefreshTokenHmacKey)
+	require.Equal(ts.T(), int64(0), *refreshedSession.RefreshTokenCounter)
+
+	require.Equal(ts.T(), refreshedSession.UserID.String(), responseHeaders.Get("sb-auth-user-id"))
+	require.Equal(ts.T(), refreshedSession.ID.String(), responseHeaders.Get("sb-auth-session-id"))
+	require.Equal(ts.T(), "0", responseHeaders.Get("sb-auth-refresh-token-counter"))
+}
+
+// TestAsRedirectURL tests that AsRedirectURL includes the Supabase Auth identifier
+func TestAsRedirectURL(t *testing.T) {
+	response := &AccessTokenResponse{
+		Token:        "test_access_token",
+		TokenType:    "bearer",
+		ExpiresIn:    3600,
+		ExpiresAt:    1234567890,
+		RefreshToken: "test_refresh_token",
+	}
+
+	extraParams := url.Values{}
+	extraParams.Set("provider_token", "provider_access_token")
+
+	redirectURL := response.AsRedirectURL("https://example.com/callback", extraParams)
+
+	// Parse the URL
+	u, err := url.Parse(redirectURL)
+	require.NoError(t, err)
+
+	// Parse the fragment
+	fragment, err := url.ParseQuery(u.Fragment)
+	require.NoError(t, err)
+
+	// Verify all expected parameters are present
+	require.Equal(t, "test_access_token", fragment.Get("access_token"))
+	require.Equal(t, "bearer", fragment.Get("token_type"))
+	require.Equal(t, "3600", fragment.Get("expires_in"))
+	require.Equal(t, "1234567890", fragment.Get("expires_at"))
+	require.Equal(t, "test_refresh_token", fragment.Get("refresh_token"))
+	require.Equal(t, "provider_access_token", fragment.Get("provider_token"))
+
+	// Verify Supabase Auth identifier is present
+	require.Contains(t, fragment, "sb", "Fragment should contain Supabase Auth identifier 'sb'")
+	require.Equal(t, "", fragment.Get("sb"), "Supabase Auth identifier should have empty value")
+}
+
+func TestGenerateAccessTokenAllowLowAAL(t *testing.T) {
+	config, err := confload.LoadGlobal("../../hack/test.env")
+	require.NoError(t, err)
+
+	conn, err := test.SetupDBConnection(config)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	allowLowAAL := 5 * time.Minute
+
+	req, err := http.NewRequest("POST", "https://example.com/", nil)
+	require.NoError(t, err)
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	t.Run("AAL1 session for MFA user uses AllowLowAAL expiry", func(t *testing.T) {
+		models.TruncateAll(conn)
+
+		u, err := models.NewUser("", "test@example.com", "password", "authenticated", nil)
+		require.NoError(t, err)
+		require.NoError(t, conn.Create(u))
+
+		// Add a verified TOTP factor so HighestPossibleAAL() returns AAL2
+		factor := models.NewFactor(u, "my-totp", models.TOTP, models.FactorStateVerified)
+		require.NoError(t, conn.Create(factor))
+		require.NoError(t, conn.Eager().Find(u, u.ID))
+
+		session, err := models.NewSession(u.ID, nil)
+		require.NoError(t, err)
+		// Session stays at AAL1 (default)
+		require.NoError(t, conn.Create(session))
+
+		cfg := *config
+		cfg.Sessions.AllowLowAAL = &allowLowAAL
+
+		srv := NewService(&cfg, &panicHookManager{})
+		srv.SetTimeFunc(func() time.Time { return now })
+
+		_, expiresAt, err := srv.GenerateAccessToken(req, conn, GenerateAccessTokenParams{
+			User:                 u,
+			SessionID:            &session.ID,
+			AuthenticationMethod: models.PasswordGrant,
+		})
+		require.NoError(t, err)
+		require.Equal(t, session.CreatedAt.UTC().Add(allowLowAAL).Unix(), expiresAt)
+	})
+
+	t.Run("AAL2 session for MFA user uses standard JWT expiry", func(t *testing.T) {
+		models.TruncateAll(conn)
+
+		u, err := models.NewUser("", "test2@example.com", "password", "authenticated", nil)
+		require.NoError(t, err)
+		require.NoError(t, conn.Create(u))
+
+		factor := models.NewFactor(u, "my-totp", models.TOTP, models.FactorStateVerified)
+		require.NoError(t, conn.Create(factor))
+		require.NoError(t, conn.Eager().Find(u, u.ID))
+
+		session, err := models.NewSession(u.ID, &factor.ID)
+		require.NoError(t, err)
+		aal2 := models.AAL2.String()
+		session.AAL = &aal2
+		require.NoError(t, conn.Create(session))
+		require.NoError(t, models.AddClaimToSession(conn, session.ID, models.TOTPSignIn))
+
+		cfg := *config
+		cfg.Sessions.AllowLowAAL = &allowLowAAL
+
+		srv := NewService(&cfg, &panicHookManager{})
+		srv.SetTimeFunc(func() time.Time { return now })
+
+		_, expiresAt, err := srv.GenerateAccessToken(req, conn, GenerateAccessTokenParams{
+			User:                 u,
+			SessionID:            &session.ID,
+			AuthenticationMethod: models.PasswordGrant,
+		})
+		require.NoError(t, err)
+		require.Equal(t, now.Add(time.Second*time.Duration(config.JWT.Exp)).Unix(), expiresAt)
+	})
+
+	t.Run("AAL1 session without AllowLowAAL uses standard JWT expiry", func(t *testing.T) {
+		models.TruncateAll(conn)
+
+		u, err := models.NewUser("", "test3@example.com", "password", "authenticated", nil)
+		require.NoError(t, err)
+		require.NoError(t, conn.Create(u))
+
+		factor := models.NewFactor(u, "my-totp", models.TOTP, models.FactorStateVerified)
+		require.NoError(t, conn.Create(factor))
+		require.NoError(t, conn.Eager().Find(u, u.ID))
+
+		session, err := models.NewSession(u.ID, nil)
+		require.NoError(t, err)
+		require.NoError(t, conn.Create(session))
+
+		cfg := *config
+		cfg.Sessions.AllowLowAAL = nil
+
+		srv := NewService(&cfg, &panicHookManager{})
+		srv.SetTimeFunc(func() time.Time { return now })
+
+		_, expiresAt, err := srv.GenerateAccessToken(req, conn, GenerateAccessTokenParams{
+			User:                 u,
+			SessionID:            &session.ID,
+			AuthenticationMethod: models.PasswordGrant,
+		})
+		require.NoError(t, err)
+		require.Equal(t, now.Add(time.Second*time.Duration(config.JWT.Exp)).Unix(), expiresAt)
+	})
 }

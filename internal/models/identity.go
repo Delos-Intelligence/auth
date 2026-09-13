@@ -37,6 +37,13 @@ func (i *Identity) GetEmail() string {
 	return string(i.Email)
 }
 
+// IsEmailVerified returns true only when identity_data contains
+// "email_verified": true. A missing key is treated as unverified.
+func (i *Identity) IsEmailVerified() bool {
+	verified, ok := i.IdentityData["email_verified"].(bool)
+	return ok && verified
+}
+
 // NewIdentity returns an identity associated to the user's id.
 func NewIdentity(user *User, provider string, identityData map[string]interface{}) (*Identity, error) {
 	providerId, ok := identityData["sub"]
@@ -103,7 +110,7 @@ func FindProvidersByUser(tx *storage.Connection, user *User) ([]string, error) {
 	identities := []Identity{}
 	providerExists := map[string]bool{}
 	providers := make([]string, 0)
-	if err := tx.Q().Select("provider").Where("user_id = ?", user.ID).All(&identities); err != nil {
+	if err := tx.Q().Select("provider").Where("user_id = ?", user.ID).Order("created_at asc").All(&identities); err != nil {
 		if errors.Cause(err) == sql.ErrNoRows {
 			return providers, nil
 		}

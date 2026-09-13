@@ -26,8 +26,8 @@ type OAuthProviderData struct {
 	code         string
 }
 
-// loadFlowState parses the `state` query parameter as a JWS payload,
-// extracting the provider requested
+// loadFlowState parses the `state` query parameter as a UUID,
+// loads the flow state from the database, and extracts the provider requested
 func (a *API) loadFlowState(w http.ResponseWriter, r *http.Request) (context.Context, error) {
 	ctx := r.Context()
 	db := a.db.WithContext(ctx)
@@ -118,7 +118,7 @@ func (a *API) oAuthCallback(ctx context.Context, r *http.Request, providerType s
 	}
 	token, err := oauthProvider.GetOAuthToken(ctx, oauthCode, tokenOpts...)
 	if err != nil {
-		return nil, apierrors.NewInternalServerError("Unable to exchange external code: %s", oauthCode).WithInternalError(err)
+		return nil, apierrors.NewInternalServerError("Unable to exchange external code: %s", oauthCode[:min(4, len(oauthCode))]).WithInternalError(err)
 	}
 
 	userData, err := oauthProvider.GetUserData(ctx, token)

@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/suite"
 	"github.com/supabase/auth/internal/api/shared"
 	"github.com/supabase/auth/internal/conf"
+	"github.com/supabase/auth/internal/conf/confload"
 	"github.com/supabase/auth/internal/hooks/v0hooks"
 	"github.com/supabase/auth/internal/models"
 	"github.com/supabase/auth/internal/storage"
@@ -31,7 +32,7 @@ type OAuthClientTestSuite struct {
 }
 
 func TestOAuthClientHandler(t *testing.T) {
-	globalConfig, err := conf.LoadGlobal(oauthServerTestConfig)
+	globalConfig, err := confload.LoadGlobal(oauthServerTestConfig)
 	require.NoError(t, err)
 
 	conn, err := test.SetupDBConnection(globalConfig)
@@ -409,6 +410,106 @@ func (ts *OAuthClientTestSuite) TestOAuthServerClientUpdateHandlerSameValues() {
 	err = ts.Server.OAuthServerClientUpdate(w, req)
 	require.NoError(ts.T(), err)
 	assert.Equal(ts.T(), http.StatusOK, w.Code)
+}
+
+func (ts *OAuthClientTestSuite) TestOAuthServerClientUpdateHandlerTokenEndpointAuthMethod() {
+	// Create a confidential client (defaults to client_secret_basic)
+	client, _ := ts.createTestOAuthClient()
+
+	// Update token_endpoint_auth_method from client_secret_basic to client_secret_post
+	newMethod := "client_secret_post"
+	payload := OAuthServerClientUpdateParams{
+		TokenEndpointAuthMethod: &newMethod,
+	}
+
+	body, err := json.Marshal(payload)
+	require.NoError(ts.T(), err)
+
+	req := httptest.NewRequest(http.MethodPut, "/admin/oauth/clients/"+client.ID.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	ctx := shared.WithOAuthServerClient(req.Context(), client)
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+
+	err = ts.Server.OAuthServerClientUpdate(w, req)
+	require.NoError(ts.T(), err)
+
+	assert.Equal(ts.T(), http.StatusOK, w.Code)
+
+	var response OAuthServerClientResponse
+	err = json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(ts.T(), err)
+
+	assert.Equal(ts.T(), "client_secret_post", response.TokenEndpointAuthMethod)
+	assert.Equal(ts.T(), "confidential", response.ClientType)
+}
+
+func (ts *OAuthClientTestSuite) TestOAuthServerClientUpdateHandlerTokenEndpointAuthMethodInvalid() {
+	// Create a confidential client
+	client, _ := ts.createTestOAuthClient()
+
+	// Attempt to set a confidential client's method to "none" (public-only method)
+	invalidMethod := "none"
+	payload := OAuthServerClientUpdateParams{
+		TokenEndpointAuthMethod: &invalidMethod,
+	}
+
+	body, err := json.Marshal(payload)
+	require.NoError(ts.T(), err)
+
+	req := httptest.NewRequest(http.MethodPut, "/admin/oauth/clients/"+client.ID.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	ctx := shared.WithOAuthServerClient(req.Context(), client)
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+
+	err = ts.Server.OAuthServerClientUpdate(w, req)
+	require.Error(ts.T(), err)
+	assert.Contains(ts.T(), err.Error(), "not valid for client_type")
+}
+
+func (ts *OAuthClientTestSuite) TestOAuthServerClientUpdateHandlerTokenEndpointAuthMethodWithOtherFields() {
+	// Create a confidential client
+	client, _ := ts.createTestOAuthClient()
+
+	// Update token_endpoint_auth_method alongside other fields
+	newMethod := "client_secret_post"
+	newClientName := "Updated With Auth Method"
+	newRedirectURIs := []string{"https://updated.example.com/callback"}
+
+	payload := OAuthServerClientUpdateParams{
+		TokenEndpointAuthMethod: &newMethod,
+		ClientName:              &newClientName,
+		RedirectURIs:            &newRedirectURIs,
+	}
+
+	body, err := json.Marshal(payload)
+	require.NoError(ts.T(), err)
+
+	req := httptest.NewRequest(http.MethodPut, "/admin/oauth/clients/"+client.ID.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	ctx := shared.WithOAuthServerClient(req.Context(), client)
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+
+	err = ts.Server.OAuthServerClientUpdate(w, req)
+	require.NoError(ts.T(), err)
+
+	assert.Equal(ts.T(), http.StatusOK, w.Code)
+
+	var response OAuthServerClientResponse
+	err = json.Unmarshal(w.Body.Bytes(), &response)
+	require.NoError(ts.T(), err)
+
+	assert.Equal(ts.T(), "client_secret_post", response.TokenEndpointAuthMethod)
+	assert.Equal(ts.T(), "Updated With Auth Method", response.ClientName)
+	assert.Equal(ts.T(), []string{"https://updated.example.com/callback"}, response.RedirectURIs)
 }
 
 func (ts *OAuthClientTestSuite) TestHandlerValidation() {

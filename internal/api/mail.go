@@ -9,6 +9,7 @@ import (
 	"github.com/supabase/auth/internal/hooks/v0hooks"
 	mail "github.com/supabase/auth/internal/mailer"
 	"github.com/supabase/auth/internal/mailer/validateclient"
+	"github.com/supabase/auth/internal/observability"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
@@ -26,6 +27,8 @@ import (
 
 var (
 	EmailRateLimitExceeded error = errors.New("email rate limit exceeded")
+	emailSendCounter             = observability.ObtainMetricCounter("global_auth_email_send_operations_total", "Number of email send operations")
+	emailErrorsCounter           = observability.ObtainMetricCounter("global_auth_email_send_errors_total", "Number of email send errors")
 )
 
 type GenerateLinkParams struct {
@@ -104,7 +107,7 @@ func (a *API) adminGenerateLink(w http.ResponseWriter, r *http.Request) error {
 			Email:    params.Email,
 			Password: params.Password,
 			Data:     params.Data,
-			Provider: "email",
+			Provider: EmailProvider,
 			Aud:      aud,
 		}
 
@@ -124,7 +127,7 @@ func (a *API) adminGenerateLink(w http.ResponseWriter, r *http.Request) error {
 		signupParams := &SignupParams{
 			Email:    params.Email,
 			Data:     params.Data,
-			Provider: "email",
+			Provider: EmailProvider,
 			Aud:      aud,
 		}
 
@@ -168,7 +171,7 @@ func (a *API) adminGenerateLink(w http.ResponseWriter, r *http.Request) error {
 				if terr != nil {
 					return terr
 				}
-				identity, terr := a.createNewIdentity(tx, user, "email", structs.Map(provider.Claims{
+				identity, terr := a.createNewIdentity(tx, user, EmailProvider, structs.Map(provider.Claims{
 					Subject: user.ID.String(),
 					Email:   user.GetEmail(),
 				}))
@@ -214,7 +217,7 @@ func (a *API) adminGenerateLink(w http.ResponseWriter, r *http.Request) error {
 				if terr != nil {
 					return terr
 				}
-				identity, terr := a.createNewIdentity(tx, user, "email", structs.Map(provider.Claims{
+				identity, terr := a.createNewIdentity(tx, user, EmailProvider, structs.Map(provider.Claims{
 					Subject: user.ID.String(),
 					Email:   user.GetEmail(),
 				}))
@@ -243,7 +246,7 @@ func (a *API) adminGenerateLink(w http.ResponseWriter, r *http.Request) error {
 			if terr != nil {
 				return terr
 			}
-			if duplicateUser, terr := models.IsDuplicatedEmail(tx, params.NewEmail, user.Aud, user, config.Experimental.ProvidersWithOwnLinkingDomain); terr != nil {
+			if duplicateUser, terr := models.IsDuplicatedEmail(tx, params.NewEmail, user.Aud, user, config.Experimental.ProviderLinkingDomains); terr != nil {
 				return apierrors.NewInternalServerError("Database error checking email").WithInternalError(terr)
 			} else if duplicateUser != nil {
 				return apierrors.NewUnprocessableEntityError(apierrors.ErrorCodeEmailExists, DuplicateEmailMsg)
@@ -335,7 +338,7 @@ func (a *API) sendConfirmation(r *http.Request, tx *storage.Connection, u *model
 	}); err != nil {
 		u.ConfirmationToken = oldToken
 		if errors.Is(err, EmailRateLimitExceeded) {
-			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, EmailRateLimitExceeded.Error())
+			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, "%s", EmailRateLimitExceeded.Error())
 		} else if herr, ok := err.(*HTTPError); ok {
 			return herr
 		}
@@ -370,7 +373,7 @@ func (a *API) sendInvite(r *http.Request, tx *storage.Connection, u *models.User
 	if err != nil {
 		u.ConfirmationToken = oldToken
 		if errors.Is(err, EmailRateLimitExceeded) {
-			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, EmailRateLimitExceeded.Error())
+			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, "%s", EmailRateLimitExceeded.Error())
 		} else if herr, ok := err.(*HTTPError); ok {
 			return herr
 		}
@@ -413,7 +416,7 @@ func (a *API) sendPasswordRecovery(r *http.Request, tx *storage.Connection, u *m
 	if err != nil {
 		u.RecoveryToken = oldToken
 		if errors.Is(err, EmailRateLimitExceeded) {
-			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, EmailRateLimitExceeded.Error())
+			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, "%s", EmailRateLimitExceeded.Error())
 		} else if herr, ok := err.(*HTTPError); ok {
 			return herr
 		}
@@ -455,7 +458,7 @@ func (a *API) sendReauthenticationOtp(r *http.Request, tx *storage.Connection, u
 	if err != nil {
 		u.ReauthenticationToken = oldToken
 		if errors.Is(err, EmailRateLimitExceeded) {
-			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, EmailRateLimitExceeded.Error())
+			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, "%s", EmailRateLimitExceeded.Error())
 		} else if herr, ok := err.(*HTTPError); ok {
 			return herr
 		}
@@ -498,7 +501,7 @@ func (a *API) sendMagicLink(r *http.Request, tx *storage.Connection, u *models.U
 	}); err != nil {
 		u.RecoveryToken = oldToken
 		if errors.Is(err, EmailRateLimitExceeded) {
-			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, EmailRateLimitExceeded.Error())
+			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, "%s", EmailRateLimitExceeded.Error())
 		} else if herr, ok := err.(*HTTPError); ok {
 			return herr
 		}
@@ -550,7 +553,7 @@ func (a *API) sendEmailChange(r *http.Request, tx *storage.Connection, u *models
 	})
 	if err != nil {
 		if errors.Is(err, EmailRateLimitExceeded) {
-			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, EmailRateLimitExceeded.Error())
+			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, "%s", EmailRateLimitExceeded.Error())
 		} else if herr, ok := err.(*HTTPError); ok {
 			return herr
 		}
@@ -590,7 +593,7 @@ func (a *API) sendPasswordChangedNotification(r *http.Request, tx *storage.Conne
 	})
 	if err != nil {
 		if errors.Is(err, EmailRateLimitExceeded) {
-			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, EmailRateLimitExceeded.Error())
+			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, "%s", EmailRateLimitExceeded.Error())
 		} else if herr, ok := err.(*HTTPError); ok {
 			return herr
 		}
@@ -607,7 +610,7 @@ func (a *API) sendEmailChangedNotification(r *http.Request, tx *storage.Connecti
 	})
 	if err != nil {
 		if errors.Is(err, EmailRateLimitExceeded) {
-			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, EmailRateLimitExceeded.Error())
+			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, "%s", EmailRateLimitExceeded.Error())
 		} else if herr, ok := err.(*HTTPError); ok {
 			return herr
 		}
@@ -624,7 +627,7 @@ func (a *API) sendPhoneChangedNotification(r *http.Request, tx *storage.Connecti
 	})
 	if err != nil {
 		if errors.Is(err, EmailRateLimitExceeded) {
-			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, EmailRateLimitExceeded.Error())
+			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, "%s", EmailRateLimitExceeded.Error())
 		} else if herr, ok := err.(*HTTPError); ok {
 			return herr
 		}
@@ -641,7 +644,7 @@ func (a *API) sendIdentityLinkedNotification(r *http.Request, tx *storage.Connec
 	})
 	if err != nil {
 		if errors.Is(err, EmailRateLimitExceeded) {
-			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, EmailRateLimitExceeded.Error())
+			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, "%s", EmailRateLimitExceeded.Error())
 		} else if herr, ok := err.(*HTTPError); ok {
 			return herr
 		}
@@ -651,14 +654,15 @@ func (a *API) sendIdentityLinkedNotification(r *http.Request, tx *storage.Connec
 	return nil
 }
 
-func (a *API) sendIdentityUnlinkedNotification(r *http.Request, tx *storage.Connection, u *models.User, provider string) error {
+func (a *API) sendIdentityUnlinkedNotification(r *http.Request, tx *storage.Connection, u *models.User, provider, recipientEmail string) error {
 	err := a.sendEmail(r, tx, u, sendEmailParams{
 		emailActionType: mail.IdentityUnlinkedNotification,
 		provider:        provider,
+		recipientEmail:  recipientEmail,
 	})
 	if err != nil {
 		if errors.Is(err, EmailRateLimitExceeded) {
-			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, EmailRateLimitExceeded.Error())
+			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, "%s", EmailRateLimitExceeded.Error())
 		} else if herr, ok := err.(*HTTPError); ok {
 			return herr
 		}
@@ -675,7 +679,7 @@ func (a *API) sendMFAFactorEnrolledNotification(r *http.Request, tx *storage.Con
 	})
 	if err != nil {
 		if errors.Is(err, EmailRateLimitExceeded) {
-			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, EmailRateLimitExceeded.Error())
+			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, "%s", EmailRateLimitExceeded.Error())
 		} else if herr, ok := err.(*HTTPError); ok {
 			return herr
 		}
@@ -692,7 +696,7 @@ func (a *API) sendMFAFactorUnenrolledNotification(r *http.Request, tx *storage.C
 	})
 	if err != nil {
 		if errors.Is(err, EmailRateLimitExceeded) {
-			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, EmailRateLimitExceeded.Error())
+			return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, "%s", EmailRateLimitExceeded.Error())
 		} else if herr, ok := err.(*HTTPError); ok {
 			return herr
 		}
@@ -710,7 +714,7 @@ func (a *API) validateEmail(email string) (string, error) {
 		return "", apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "An email address is too long")
 	}
 	if err := checkmail.ValidateFormat(email); err != nil {
-		return "", apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Unable to validate email address: "+err.Error())
+		return "", apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Unable to validate email address: %s", err.Error())
 	}
 
 	return strings.ToLower(email), nil
@@ -718,7 +722,7 @@ func (a *API) validateEmail(email string) (string, error) {
 
 func validateSentWithinFrequencyLimit(sentAt *time.Time, frequency time.Duration) error {
 	if sentAt != nil && sentAt.Add(frequency).After(time.Now()) {
-		return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, generateFrequencyLimitErrorMessage(sentAt, frequency))
+		return apierrors.NewTooManyRequestsError(apierrors.ErrorCodeOverEmailSendRateLimit, "%s", generateFrequencyLimitErrorMessage(sentAt, frequency))
 	}
 	return nil
 }
@@ -751,6 +755,7 @@ type sendEmailParams struct {
 	oldPhone            string
 	provider            string
 	factorType          string
+	recipientEmail      string
 }
 
 func (a *API) sendEmail(r *http.Request, tx *storage.Connection, u *models.User, params sendEmailParams) error {
@@ -759,10 +764,14 @@ func (a *API) sendEmail(r *http.Request, tx *storage.Connection, u *models.User,
 	referrerURL := utilities.GetReferrer(r, config)
 	externalURL := getExternalHost(ctx)
 	otp := params.otp
+	recipientEmail := params.recipientEmail
+	if recipientEmail == "" {
+		recipientEmail = u.GetEmail()
+	}
 
 	if params.emailActionType != mail.EmailChangeVerification {
-		if u.GetEmail() != "" && !a.checkEmailAddressAuthorization(u.GetEmail()) {
-			return apierrors.NewBadRequestError(apierrors.ErrorCodeEmailAddressNotAuthorized, "Email address %q cannot be used as it is not authorized", u.GetEmail())
+		if recipientEmail != "" && !a.checkEmailAddressAuthorization(recipientEmail) {
+			return apierrors.NewBadRequestError(apierrors.ErrorCodeEmailAddressNotAuthorized, "Email address %q cannot be used as it is not authorized", recipientEmail)
 		}
 	} else {
 		// first check that the user can update their address to the
@@ -852,18 +861,26 @@ func (a *API) sendEmail(r *http.Request, tx *storage.Connection, u *models.User,
 		case mail.PhoneChangedNotification:
 			emailData.OldPhone = params.oldPhone
 		case mail.IdentityLinkedNotification, mail.IdentityUnlinkedNotification:
+			// TODO(fm): propagate recipientEmail in the hook payload;
+			// consumers currently deliver identity_unlinked to user.email, which
+			// may be a different (promoted) address after unlinking.
 			emailData.Provider = params.provider
 		case mail.MFAFactorEnrolledNotification, mail.MFAFactorUnenrolledNotification:
 			emailData.FactorType = params.factorType
 		}
 
-		input := v0hooks.SendEmailInput{
-			User:      u,
-			EmailData: emailData,
-		}
+		input := v0hooks.NewSendEmailInput(
+			r,
+			u,
+			emailData,
+		)
 		output := v0hooks.SendEmailOutput{}
-		return a.hooksMgr.InvokeHook(tx, r, &input, &output)
+		return a.hooksMgr.InvokeHook(tx, r, input, &output)
 	}
+
+	// Increment email send operations here, since this metric is meant to count number of mail
+	// send operations rather than simply number of attempts to send mail
+	emailSendCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("type", params.emailActionType)))
 
 	mr := a.Mailer()
 	var err error
@@ -889,7 +906,7 @@ func (a *API) sendEmail(r *http.Request, tx *storage.Connection, u *models.User,
 	case mail.IdentityLinkedNotification:
 		err = mr.IdentityLinkedNotificationMail(r, u, params.provider)
 	case mail.IdentityUnlinkedNotification:
-		err = mr.IdentityUnlinkedNotificationMail(r, u, params.provider)
+		err = mr.IdentityUnlinkedNotificationMail(r, u, params.provider, recipientEmail)
 	case mail.MFAFactorEnrolledNotification:
 		err = mr.MFAFactorEnrolledNotificationMail(r, u, params.factorType)
 	case mail.MFAFactorUnenrolledNotification:
@@ -902,10 +919,15 @@ func (a *API) sendEmail(r *http.Request, tx *storage.Connection, u *models.User,
 	case errors.Is(err, validateclient.ErrInvalidEmailAddress),
 		errors.Is(err, validateclient.ErrInvalidEmailFormat),
 		errors.Is(err, validateclient.ErrInvalidEmailDNS):
+
+		emailErrorsCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("type", params.emailActionType)))
 		return apierrors.NewBadRequestError(
 			apierrors.ErrorCodeEmailAddressInvalid,
 			"Email address %q is invalid",
-			u.GetEmail())
+			recipientEmail)
+	case err != nil:
+		emailErrorsCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("type", params.emailActionType)))
+		return err
 	default:
 		return err
 	}

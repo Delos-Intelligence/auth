@@ -10,11 +10,10 @@ import (
 	"strings"
 
 	"github.com/supabase/auth/internal/conf"
+	"github.com/supabase/auth/internal/sbff"
 )
 
-// GetIPAddress returns the real IP address of the HTTP request. It parses the
-// X-Forwarded-For header.
-func GetIPAddress(r *http.Request) string {
+func getIPAddressWithXFF(r *http.Request) string {
 	if r.Header != nil {
 		xForwardedFor := r.Header.Get("X-Forwarded-For")
 		if xForwardedFor != "" {
@@ -43,6 +42,15 @@ func GetIPAddress(r *http.Request) string {
 	}
 
 	return ip
+}
+
+// GetIPAddress returns the real IP address of the HTTP request.
+func GetIPAddress(r *http.Request) string {
+	if sbffAddr, ok := sbff.GetIPAddress(r); ok {
+		return sbffAddr
+	}
+
+	return getIPAddressWithXFF(r)
 }
 
 // GetBodyBytes reads the whole request body properly into a byte array.
@@ -90,15 +98,18 @@ func IsRedirectURLValid(config *conf.GlobalConfiguration, redirectURL string) bo
 
 	base, berr := url.Parse(config.SiteURL)
 	refurl, rerr := url.Parse(redirectURL)
-
-	// As long as the referrer came from the site, we will redirect back there
-	if berr == nil && rerr == nil && base.Hostname() == refurl.Hostname() {
-		return true
+	if berr != nil || rerr != nil {
+		// either URL is for some reason invalid
+		return false
 	}
 
-	if rerr != nil {
-		// redirect URL is for some reason invalid
-		return false
+	// Allow redirects back to the site: scheme, host and port must match. The port
+	// check is skipped for loopback addresses, since per RFC 8252 Section 7.3 native
+	// apps must be allowed to use variable port numbers.
+	if base.Hostname() == refurl.Hostname() &&
+		base.Scheme == refurl.Scheme &&
+		(base.Port() == refurl.Port() || isLocalhost(refurl.Hostname())) {
+		return true
 	}
 
 	scheme := strings.TrimSuffix(strings.ToLower(refurl.Scheme), ":")

@@ -51,24 +51,13 @@ type OAuthServerClientListResponse struct {
 
 // oauthServerClientToResponse converts a model to response format
 func oauthServerClientToResponse(client *models.OAuthServerClient) *OAuthServerClientResponse {
-	// Set token endpoint auth methods based on client type
-	var tokenEndpointAuthMethods string
-	// TODO(cemal) :: Remove this once we have the token endpoint auth method stored in the database
-	if client.IsPublic() {
-		// Public clients don't use client authentication
-		tokenEndpointAuthMethods = models.TokenEndpointAuthMethodNone
-	} else {
-		// Confidential clients use client secret authentication
-		tokenEndpointAuthMethods = models.TokenEndpointAuthMethodClientSecretBasic
-	}
-
 	response := &OAuthServerClientResponse{
 		ClientID:   client.ID.String(),
 		ClientType: client.ClientType,
 
 		// OAuth 2.1 DCR fields
 		RedirectURIs:            client.GetRedirectURIs(),
-		TokenEndpointAuthMethod: tokenEndpointAuthMethods,
+		TokenEndpointAuthMethod: client.GetTokenEndpointAuthMethod(),
 		GrantTypes:              client.GetGrantTypes(),
 		ResponseTypes:           []string{"code"}, // Always "code" in OAuth 2.1
 		ClientName:              utilities.StringValue(client.ClientName),
@@ -127,7 +116,7 @@ func (s *Server) AdminOAuthServerClientRegister(w http.ResponseWriter, r *http.R
 
 	client, plaintextSecret, err := s.registerOAuthServerClient(ctx, &params)
 	if err != nil {
-		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, err.Error())
+		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "%s", err.Error())
 	}
 
 	response := oauthServerClientToResponse(client)
@@ -156,7 +145,7 @@ func (s *Server) OAuthServerClientDynamicRegister(w http.ResponseWriter, r *http
 
 	client, plaintextSecret, err := s.registerOAuthServerClient(ctx, &params)
 	if err != nil {
-		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, err.Error())
+		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "%s", err.Error())
 	}
 
 	response := oauthServerClientToResponse(client)
@@ -274,6 +263,7 @@ type OAuthTokenParams struct {
 
 // OAuthToken handles POST /oauth/token
 func (s *Server) OAuthToken(w http.ResponseWriter, r *http.Request) error {
+	shared.SetTokenResponseHeaders(w)
 	ctx := r.Context()
 
 	var params OAuthTokenParams
@@ -405,6 +395,13 @@ func (s *Server) handleAuthorizationCodeGrant(ctx context.Context, w http.Respon
 	grantParams.Scopes = &scopes
 
 	err = db.Transaction(func(tx *storage.Connection) error {
+		if _, terr := models.FindOAuthServerAuthorizationByIDForUpdate(tx, authorization.AuthorizationID); terr != nil {
+			if models.IsNotFoundError(terr) {
+				return apierrors.NewOAuthError("invalid_grant", "Invalid authorization code")
+			}
+			return apierrors.NewInternalServerError("Error locking authorization code").WithInternalError(terr)
+		}
+
 		authMethod := models.OAuthProviderAuthorizationCode
 
 		// Create audit log entry for OAuth token exchange
@@ -435,6 +432,9 @@ func (s *Server) handleAuthorizationCodeGrant(ctx context.Context, w http.Respon
 		if httpErr, ok := err.(*apierrors.HTTPError); ok {
 			return httpErr
 		}
+		if oauthErr, ok := err.(*apierrors.OAuthError); ok {
+			return oauthErr
+		}
 		return apierrors.NewInternalServerError("Error exchanging authorization code").WithInternalError(err)
 	}
 
@@ -446,7 +446,7 @@ func (s *Server) handleAuthorizationCodeGrant(ctx context.Context, w http.Respon
 			nonce = *authorization.Nonce
 		}
 
-		idToken, err := tokenService.GenerateIDToken(tokens.GenerateIDTokenParams{
+		idToken, err := tokenService.GenerateIDToken(ctx, tokens.GenerateIDTokenParams{
 			User:     user,
 			ClientID: client.ID,
 			Nonce:    nonce,
@@ -473,7 +473,7 @@ func (s *Server) handleAuthorizationCodeGrant(ctx context.Context, w http.Respon
 		oauthResponse["id_token"] = tokenResponse.IDToken
 	}
 
-	return shared.SendJSON(w, http.StatusOK, oauthResponse)
+	return shared.SendTokenJSON(w, http.StatusOK, oauthResponse)
 }
 
 // handleRefreshTokenGrant handles the refresh_token grant type
@@ -511,7 +511,7 @@ func (s *Server) handleRefreshTokenGrant(ctx context.Context, w http.ResponseWri
 		"refresh_token": tokenResponse.RefreshToken,
 	}
 
-	return shared.SendJSON(w, http.StatusOK, oauthResponse)
+	return shared.SendTokenJSON(w, http.StatusOK, oauthResponse)
 }
 
 // getTokenService retrieves the token service from the server

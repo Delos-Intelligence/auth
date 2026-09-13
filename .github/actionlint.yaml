@@ -1,0 +1,5 @@
+# Upstream-only jobs retain their original runner labels and are disabled in Delos.
+self-hosted-runner:
+  labels:
+    - blacksmith-2vcpu-ubuntu-2404
+    - blacksmith-4vcpu-ubuntu-2404

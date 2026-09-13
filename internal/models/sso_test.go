@@ -8,7 +8,7 @@ import (
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/supabase/auth/internal/conf"
+	"github.com/supabase/auth/internal/conf/confload"
 	"github.com/supabase/auth/internal/storage"
 	"github.com/supabase/auth/internal/storage/test"
 )
@@ -24,7 +24,7 @@ func (ts *SSOTestSuite) SetupTest() {
 }
 
 func TestSSO(t *testing.T) {
-	globalConfig, err := conf.LoadGlobal(modelsTestConfig)
+	globalConfig, err := confload.LoadGlobal(modelsTestConfig)
 	require.NoError(t, err)
 
 	conn, err := test.SetupDBConnection(globalConfig)
@@ -405,18 +405,17 @@ func (ts *SSOTestSuite) TestFindSSOProviderByResourceID() {
 		},
 	}
 
+	getIDs := func(providers []*SSOProvider) []uuid.UUID {
+		ids := make([]uuid.UUID, len(providers))
+		for i, p := range providers {
+			ids[i] = p.ID
+		}
+		return ids
+	}
+
 	check := func(t *testing.T, exp, got []*SSOProvider) {
 		t.Helper()
-
-		require.Len(t, got, len(exp))
-
-		isEqual := func(a, b *SSOProvider) bool {
-			return a.ID == b.ID && a.ResourceID == b.ResourceID
-		}
-		equal := slices.EqualFunc(exp, got, isEqual)
-		if !equal {
-			require.Equal(t, exp, got)
-		}
+		require.ElementsMatch(t, getIDs(exp), getIDs(got))
 	}
 
 	for _, test := range tests {

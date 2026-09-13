@@ -33,8 +33,8 @@ const (
 	oauthVerifierKey    = contextKey("oauth_verifier")
 	ssoProviderKey      = contextKey("sso_provider")
 	externalHostKey     = contextKey("external_host")
-	flowStateKey        = contextKey("flow_state_id")
 	oauthClientStateKey = contextKey("oauth_client_state_id")
+	flowStateContextKey = contextKey("flow_state")
 )
 
 // withToken adds the JWT token to the context.
@@ -127,18 +127,6 @@ func withInviteToken(ctx context.Context, token string) context.Context {
 	return context.WithValue(ctx, inviteTokenKey, token)
 }
 
-func withFlowStateID(ctx context.Context, FlowStateID string) context.Context {
-	return context.WithValue(ctx, flowStateKey, FlowStateID)
-}
-
-func getFlowStateID(ctx context.Context) string {
-	obj := ctx.Value(flowStateKey)
-	if obj == nil {
-		return ""
-	}
-	return obj.(string)
-}
-
 func withOAuthClientStateID(ctx context.Context, oauthClientStateID uuid.UUID) context.Context {
 	return context.WithValue(ctx, oauthClientStateKey, oauthClientStateID)
 }
@@ -150,6 +138,20 @@ func getOAuthClientStateID(ctx context.Context) uuid.UUID {
 	}
 
 	return obj.(uuid.UUID)
+}
+
+// withFlowState stores the entire FlowState object in the context
+func withFlowState(ctx context.Context, flowState *models.FlowState) context.Context {
+	return context.WithValue(ctx, flowStateContextKey, flowState)
+}
+
+// getFlowState retrieves the FlowState object from the context
+func getFlowState(ctx context.Context) *models.FlowState {
+	obj := ctx.Value(flowStateContextKey)
+	if obj == nil {
+		return nil
+	}
+	return obj.(*models.FlowState)
 }
 
 func getInviteToken(ctx context.Context) string {
