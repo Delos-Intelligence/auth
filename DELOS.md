@@ -95,6 +95,8 @@ recovery AMR, and native OAuth exchange/refresh cache headers. Two upstream
 password-recovery expectations now explicitly assert Delos policy. The upstream
 PKCE fixture was completed with the user token fields written by real issuance;
 its expected successful flow is unchanged. Other upstream tests remain enabled.
+Five upstream files also needed formatting-only changes for the standard gofmt
+CI gate; their whitespace-insensitive diff is empty.
 
 The complete suite, static checks and Docker build were rerun successfully
 with Go 1.26.8. The upstream vulnerability gate passes with only its two
