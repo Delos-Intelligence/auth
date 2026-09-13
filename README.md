@@ -2,6 +2,9 @@
 
 [![Coverage Status](https://coveralls.io/repos/github/supabase/auth/badge.svg?branch=master)](https://coveralls.io/github/supabase/auth?branch=master)
 
+Delos maintainers: see [the v2.196.0 fork, validation and release notes](DELOS.md)
+and [the original patch audit](DELOS-PATCH-AUDIT.md).
+
 Auth is a user management and authentication server written in Go that powers
 [Supabase](https://supabase.com)'s features such as:
 
