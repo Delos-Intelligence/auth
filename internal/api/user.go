@@ -18,6 +18,7 @@ import (
 type UserUpdateParams struct {
 	Email               string                 `json:"email"`
 	Password            *string                `json:"password"`
+	CurrentPassword     *string                `json:"current_password,omitempty"`
 	Nonce               string                 `json:"nonce"`
 	Data                map[string]interface{} `json:"data"`
 	AppData             map[string]interface{} `json:"app_metadata,omitempty"`
@@ -131,7 +132,7 @@ func (a *API) UserUpdate(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	if params.Email != "" && user.GetEmail() != params.Email {
-		if duplicateUser, err := models.IsDuplicatedEmail(db, params.Email, aud, user, config.Experimental.ProvidersWithOwnLinkingDomain); err != nil {
+		if duplicateUser, err := models.IsDuplicatedEmail(db, params.Email, aud, user, config.Experimental.ProviderLinkingDomains); err != nil {
 			return apierrors.NewInternalServerError("Database error checking email").WithInternalError(err)
 		} else if duplicateUser != nil {
 			return apierrors.NewUnprocessableEntityError(apierrors.ErrorCodeEmailExists, DuplicateEmailMsg)
@@ -146,7 +147,15 @@ func (a *API) UserUpdate(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 
+	// must be captured before setting password below (via user.SetPassword)
+	addingFirstPassword := params.Password != nil && *params.Password != "" && !user.HasPassword()
+
 	if params.Password != nil {
+		// Preserve the existing Delos contract for first-password requests too.
+		if config.Security.UpdatePasswordRequireCurrentPassword && !isPasswordRecoverySession(session) &&
+			(params.CurrentPassword == nil || *params.CurrentPassword == "") {
+			return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Current password is required to update password")
+		}
 		if config.Security.UpdatePasswordRequireReauthentication {
 			now := time.Now()
 			// we require reauthentication if the user hasn't signed in recently in the current session
@@ -165,6 +174,22 @@ func (a *API) UserUpdate(w http.ResponseWriter, r *http.Request) error {
 			isSamePassword := false
 
 			if user.HasPassword() {
+				// current password required when updating password
+				if config.Security.UpdatePasswordRequireCurrentPassword {
+					// ensure user is not in a password recovery flow
+					if !isPasswordRecoverySession(session) {
+						if params.CurrentPassword == nil || *params.CurrentPassword == "" {
+							return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Current password is required to update password")
+						}
+						isCurrentPasswordCorrect, _, err := user.Authenticate(ctx, db, *params.CurrentPassword, config.Security.DBEncryption.DecryptionKeys, false, "")
+						if err != nil {
+							return err
+						}
+						if !isCurrentPasswordCorrect {
+							return apierrors.NewBadRequestError(apierrors.ErrorCodeInvalidCredentials, InvalidLoginMessage)
+						}
+					}
+				}
 				auth, _, err := user.Authenticate(ctx, db, password, config.Security.DBEncryption.DecryptionKeys, false, "")
 				if err != nil {
 					return err
@@ -197,6 +222,14 @@ func (a *API) UserUpdate(w http.ResponseWriter, r *http.Request) error {
 
 			if terr := models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.UserUpdatePasswordAction, "", nil); terr != nil {
 				return terr
+			}
+
+			// this is the first time a user sets a password on their account
+			// TODO(fm): we may want to relax it to also create identities for existing passwords
+			if addingFirstPassword {
+				if terr := a.ensureEmailIdentityForPassword(tx, user); terr != nil {
+					return terr
+				}
 			}
 
 			// send a Password Changed email notification to the user to inform them that their password has been changed
@@ -274,4 +307,18 @@ func (a *API) UserUpdate(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	return sendJSON(w, http.StatusOK, user)
+}
+
+// Delos exempts explicit password recovery, not ordinary OTP or magic-link login.
+// Keep this local: upstream Session.IsRecovery has broader uses and semantics.
+func isPasswordRecoverySession(session *models.Session) bool {
+	if session == nil {
+		return false
+	}
+	for _, claim := range session.AMRClaims {
+		if claim.GetAuthenticationMethod() == models.Recovery.String() {
+			return true
+		}
+	}
+	return false
 }

@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gofrs/uuid"
 	jwt "github.com/golang-jwt/jwt/v5"
@@ -57,7 +59,38 @@ func (ts *AuthTestSuite) TestExtractBearerToken() {
 	require.Equal(ts.T(), userJwt, token)
 }
 
+// TestExtractBearerTokenCaseInsensitive verifies that the Bearer scheme
+// is matched case-insensitively per RFC 7235 §2.1.
+func TestExtractBearerTokenCaseInsensitive(t *testing.T) {
+	a := &API{}
+	token := "eyJhbGciOiJIUzI1NiJ9.e30.ZRrHA1JJJW8opB1Qfp7QDnH0sWd2N_gy0lsVOKiQ28"
+
+	cases := []struct {
+		scheme string
+	}{
+		{"Bearer"},
+		{"bearer"},
+		{"BEARER"},
+		{"bEaReR"},
+		{"BeArEr"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.scheme, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://localhost", nil)
+			req.Header.Set("Authorization", c.scheme+" "+token)
+
+			got, err := a.extractBearerToken(req)
+			require.NoError(t, err, "scheme %q should be accepted per RFC 7235 §2.1", c.scheme)
+			require.Equal(t, token, got)
+		})
+	}
+}
+
 func (ts *AuthTestSuite) TestParseJWTClaims() {
+	originalJWT := ts.Config.JWT
+	defer func() { ts.Config.JWT = originalJWT }()
+
 	cases := []struct {
 		desc string
 		key  map[string]interface{}
@@ -139,7 +172,7 @@ func (ts *AuthTestSuite) TestParseJWTClaims() {
 			jwk, err := conf.GetSigningJwk(&ts.Config.JWT)
 			require.NoError(ts.T(), err)
 			signingMethod := conf.GetSigningAlg(jwk)
-			signingKey, err := conf.GetSigningKey(jwk)
+			signingKey, err := ts.Config.JWT.SigningKey(context.Background())
 			require.NoError(ts.T(), err)
 
 			userJwtToken := jwt.NewWithClaims(signingMethod, userClaims)
@@ -282,4 +315,55 @@ func (ts *AuthTestSuite) TestMaybeLoadUserOrSession() {
 			require.Equal(ts.T(), c.ExpectedSession, getSession(ctx))
 		})
 	}
+}
+
+// TestRequireAuthenticationBannedUser verifies that a banned user holding a
+// still-valid access token is rejected by requireAuthentication, while
+// non-banned users and users whose ban has expired are allowed through.
+func (ts *AuthTestSuite) TestRequireAuthenticationBannedUser() {
+	u, err := models.FindUserByEmailAndAudience(ts.API.db, "test@example.com", ts.Config.JWT.Aud)
+	require.NoError(ts.T(), err)
+
+	newAuthedRequest := func() *http.Request {
+		claims := &AccessTokenClaims{
+			RegisteredClaims: jwt.RegisteredClaims{
+				Subject: u.ID.String(),
+			},
+			Role: "authenticated",
+		}
+		userJwt, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(ts.Config.JWT.Secret))
+		require.NoError(ts.T(), err)
+
+		req := httptest.NewRequest(http.MethodGet, "http://localhost", nil)
+		req.Header.Set("Authorization", "Bearer "+userJwt)
+		return req
+	}
+
+	ts.Run("Banned user is rejected", func() {
+		require.NoError(ts.T(), u.Ban(ts.API.db, time.Hour))
+
+		_, err := ts.API.requireAuthentication(httptest.NewRecorder(), newAuthedRequest())
+		require.Error(ts.T(), err)
+		require.Equal(ts.T(),
+			apierrors.NewForbiddenError(apierrors.ErrorCodeUserBanned, "User is banned").Error(),
+			err.Error())
+	})
+
+	ts.Run("Expired ban is allowed", func() {
+		pastBan := time.Now().Add(-time.Hour)
+		u.BannedUntil = &pastBan
+		require.NoError(ts.T(), ts.API.db.UpdateOnly(u, "banned_until"))
+
+		ctx, err := ts.API.requireAuthentication(httptest.NewRecorder(), newAuthedRequest())
+		require.NoError(ts.T(), err)
+		require.NotNil(ts.T(), getUser(ctx))
+	})
+
+	ts.Run("Non-banned user is allowed", func() {
+		require.NoError(ts.T(), u.Ban(ts.API.db, 0))
+
+		ctx, err := ts.API.requireAuthentication(httptest.NewRecorder(), newAuthedRequest())
+		require.NoError(ts.T(), err)
+		require.NotNil(ts.T(), getUser(ctx))
+	})
 }

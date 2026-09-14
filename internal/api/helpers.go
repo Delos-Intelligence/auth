@@ -10,7 +10,6 @@ import (
 	"github.com/supabase/auth/internal/api/shared"
 	"github.com/supabase/auth/internal/conf"
 	"github.com/supabase/auth/internal/models"
-	"github.com/supabase/auth/internal/security"
 
 	"github.com/supabase/auth/internal/utilities"
 )
@@ -48,6 +47,7 @@ func (a *API) requestAud(ctx context.Context, r *http.Request) string {
 
 type RequestParams interface {
 	AdminUserParams |
+		AdminCustomOAuthProviderParams |
 		CreateSSOProviderParams |
 		EnrollFactorParams |
 		GenerateLinkParams |
@@ -68,7 +68,7 @@ type RequestParams interface {
 		VerifyParams |
 		adminUserUpdateFactorParams |
 		adminUserDeleteParams |
-		security.GotrueRequest |
+		captchaRequest |
 		ChallengeFactorParams |
 
 		struct {
@@ -84,10 +84,17 @@ type RequestParams interface {
 func retrieveRequestParams[A RequestParams](r *http.Request, params *A) error {
 	body, err := utilities.GetBodyBytes(r)
 	if err != nil {
+		if err, ok := err.(*http.MaxBytesError); ok {
+			return apierrors.NewHTTPError(http.StatusRequestEntityTooLarge, apierrors.ErrorCodeRequestEntityTooLarge, "Request body too large (max %d bytes)", err.Limit)
+		}
 		return apierrors.NewInternalServerError("Could not read body into byte slice").WithInternalError(err)
 	}
 	if err := json.Unmarshal(body, params); err != nil {
 		return apierrors.NewBadRequestError(apierrors.ErrorCodeBadJSON, "Could not parse request body as JSON: %v", err)
 	}
 	return nil
+}
+
+func sendTokenJSON(w http.ResponseWriter, status int, obj any) error {
+	return shared.SendTokenJSON(w, status, obj)
 }

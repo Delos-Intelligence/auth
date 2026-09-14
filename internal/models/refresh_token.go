@@ -41,13 +41,17 @@ func (RefreshToken) TableName() string {
 // GrantParams is used to pass session-specific parameters when issuing a new
 // refresh token to authenticated users.
 type GrantParams struct {
-	FactorID *uuid.UUID
+	DelosAMRClaims []AMRClaim
+	DelosAAL       AuthenticatorAssuranceLevel
+	FactorID       *uuid.UUID
 
 	SessionNotAfter *time.Time
 	SessionTag      *string
 
-	OAuthClientID *uuid.UUID
-	Scopes        *string
+	DelosAccessMode *string
+	DelosResource   *string
+	OAuthClientID   *uuid.UUID
+	Scopes          *string
 
 	UserAgent string
 	IP        string
@@ -110,7 +114,7 @@ func RevokeTokenFamily(tx *storage.Connection, token *RefreshToken) error {
 
 func FindTokenBySessionID(tx *storage.Connection, sessionId *uuid.UUID) (*RefreshToken, error) {
 	refreshToken := &RefreshToken{}
-	err := tx.Q().Where("instance_id = ? and session_id = ?", uuid.Nil, sessionId).Order("created_at asc").First(refreshToken)
+	err := tx.Q().Where("instance_id = ? and session_id = ? and revoked = false", uuid.Nil, sessionId).Order("created_at asc").First(refreshToken)
 	if err != nil {
 		if errors.Cause(err) == sql.ErrNoRows {
 			return nil, RefreshTokenNotFoundError{}
@@ -143,6 +147,9 @@ func (s *Session) ApplyGrantParams(params *GrantParams) {
 		s.OAuthClientID = params.OAuthClientID
 	}
 
+	s.DelosAccessMode = params.DelosAccessMode
+	s.DelosResource = params.DelosResource
+
 	if params.Scopes != nil && *params.Scopes != "" {
 		s.Scopes = params.Scopes
 	}
@@ -166,6 +173,10 @@ func (s *Session) SetupRefreshTokenData(dbEncryption conf.DatabaseEncryptionConf
 	s.RefreshTokenCounter = &counter
 
 	return nil
+}
+
+func (s *Session) UpdateRefreshTokenCounterAndHmacKey(tx *storage.Connection) error {
+	return tx.UpdateOnly(s, "refresh_token_hmac_key", "refresh_token_counter")
 }
 
 func createRefreshToken(tx *storage.Connection, user *User, oldToken *RefreshToken, params *GrantParams) (*RefreshToken, error) {

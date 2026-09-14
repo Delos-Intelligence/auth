@@ -51,24 +51,13 @@ type OAuthServerClientListResponse struct {
 
 // oauthServerClientToResponse converts a model to response format
 func oauthServerClientToResponse(client *models.OAuthServerClient) *OAuthServerClientResponse {
-	// Set token endpoint auth methods based on client type
-	var tokenEndpointAuthMethods string
-	// TODO(cemal) :: Remove this once we have the token endpoint auth method stored in the database
-	if client.IsPublic() {
-		// Public clients don't use client authentication
-		tokenEndpointAuthMethods = models.TokenEndpointAuthMethodNone
-	} else {
-		// Confidential clients use client secret authentication
-		tokenEndpointAuthMethods = models.TokenEndpointAuthMethodClientSecretBasic
-	}
-
 	response := &OAuthServerClientResponse{
 		ClientID:   client.ID.String(),
 		ClientType: client.ClientType,
 
 		// OAuth 2.1 DCR fields
 		RedirectURIs:            client.GetRedirectURIs(),
-		TokenEndpointAuthMethod: tokenEndpointAuthMethods,
+		TokenEndpointAuthMethod: client.GetTokenEndpointAuthMethod(),
 		GrantTypes:              client.GetGrantTypes(),
 		ResponseTypes:           []string{"code"}, // Always "code" in OAuth 2.1
 		ClientName:              utilities.StringValue(client.ClientName),
@@ -127,7 +116,7 @@ func (s *Server) AdminOAuthServerClientRegister(w http.ResponseWriter, r *http.R
 
 	client, plaintextSecret, err := s.registerOAuthServerClient(ctx, &params)
 	if err != nil {
-		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, err.Error())
+		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "%s", err.Error())
 	}
 
 	response := oauthServerClientToResponse(client)
@@ -156,7 +145,7 @@ func (s *Server) OAuthServerClientDynamicRegister(w http.ResponseWriter, r *http
 
 	client, plaintextSecret, err := s.registerOAuthServerClient(ctx, &params)
 	if err != nil {
-		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, err.Error())
+		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "%s", err.Error())
 	}
 
 	response := oauthServerClientToResponse(client)
@@ -273,7 +262,8 @@ type OAuthTokenParams struct {
 }
 
 // OAuthToken handles POST /oauth/token
-func (s *Server) OAuthToken(w http.ResponseWriter, r *http.Request) error {
+func (s *Server) OAuthToken(w http.ResponseWriter, r *http.Request) (resultErr error) {
+	shared.SetTokenResponseHeaders(w)
 	ctx := r.Context()
 
 	var params OAuthTokenParams
@@ -307,6 +297,16 @@ func (s *Server) OAuthToken(w http.ResponseWriter, r *http.Request) error {
 	client := shared.GetOAuthServerClient(ctx)
 	if client == nil {
 		return apierrors.NewOAuthError("invalid_client", "Client authentication required")
+	}
+
+	if params.GrantType == GrantTypeAuthorizationCode || params.GrantType == GrantTypeRefreshToken {
+		event := "signin"
+		if params.GrantType == GrantTypeRefreshToken {
+			event = "refresh"
+		}
+		defer func() {
+			models.ObserveDelosOAuthActivity(ctx, s.db, "native", client.ID.String(), event, resultErr == nil)
+		}()
 	}
 
 	// Validate that the authenticated client is allowed to use the requested grant type
@@ -397,6 +397,7 @@ func (s *Server) handleAuthorizationCodeGrant(ctx context.Context, w http.Respon
 	// Exchange the authorization code for tokens
 	var tokenResponse *tokens.AccessTokenResponse
 	var grantParams models.GrantParams
+	var sourceAuthTime *time.Time
 	grantParams.FillGrantParams(r)
 	grantParams.OAuthClientID = &client.ID
 
@@ -405,6 +406,42 @@ func (s *Server) handleAuthorizationCodeGrant(ctx context.Context, w http.Respon
 	grantParams.Scopes = &scopes
 
 	err = db.Transaction(func(tx *storage.Connection) error {
+		if _, terr := models.FindOAuthServerAuthorizationByIDForUpdate(tx, authorization.AuthorizationID); terr != nil {
+			if models.IsNotFoundError(terr) {
+				return apierrors.NewOAuthError("invalid_grant", "Invalid authorization code")
+			}
+			return apierrors.NewInternalServerError("Error locking authorization code").WithInternalError(terr)
+		}
+
+		if s.config.OAuthServer.DelosPolicyEnabled {
+			policy, err := s.delosPolicy(tx, client.ID, scopes, utilities.StringValue(authorization.Resource))
+			if err != nil {
+				return err
+			}
+			if authorization.DelosSourceSessionID == nil || authorization.DelosSourceAAL == nil || authorization.ApprovedAt == nil {
+				return apierrors.NewOAuthError("invalid_grant", "Missing source authentication")
+			}
+			source, err := models.FindSessionByID(tx, *authorization.DelosSourceSessionID, false)
+			if err != nil {
+				return apierrors.NewOAuthError("invalid_grant", "Source session is unavailable")
+			}
+			evidence, aal, err := models.DelosOAuthProof(source, user, *authorization.ApprovedAt, *authorization.DelosSourceAAL, policy.RequireAAL2, s.delosSessionValidity(), time.Now())
+			if err != nil {
+				return apierrors.NewOAuthError("invalid_grant", "Source authentication is no longer sufficient")
+			}
+			for _, claim := range evidence {
+				if sourceAuthTime == nil || claim.UpdatedAt.After(*sourceAuthTime) {
+					timestamp := claim.UpdatedAt
+					sourceAuthTime = &timestamp
+				}
+			}
+			grantParams.DelosAMRClaims = evidence
+			grantParams.DelosAAL = aal
+			grantParams.FactorID = source.FactorID
+			grantParams.DelosAccessMode = &policy.AccessMode
+			grantParams.DelosResource = &policy.Resource
+		}
+
 		authMethod := models.OAuthProviderAuthorizationCode
 
 		// Create audit log entry for OAuth token exchange
@@ -435,6 +472,9 @@ func (s *Server) handleAuthorizationCodeGrant(ctx context.Context, w http.Respon
 		if httpErr, ok := err.(*apierrors.HTTPError); ok {
 			return httpErr
 		}
+		if oauthErr, ok := err.(*apierrors.OAuthError); ok {
+			return oauthErr
+		}
 		return apierrors.NewInternalServerError("Error exchanging authorization code").WithInternalError(err)
 	}
 
@@ -446,11 +486,14 @@ func (s *Server) handleAuthorizationCodeGrant(ctx context.Context, w http.Respon
 			nonce = *authorization.Nonce
 		}
 
-		idToken, err := tokenService.GenerateIDToken(tokens.GenerateIDTokenParams{
+		if sourceAuthTime == nil {
+			sourceAuthTime = user.LastSignInAt
+		}
+		idToken, err := tokenService.GenerateIDToken(ctx, tokens.GenerateIDTokenParams{
 			User:     user,
 			ClientID: client.ID,
 			Nonce:    nonce,
-			AuthTime: user.LastSignInAt,
+			AuthTime: sourceAuthTime,
 			Scopes:   scopeList,
 		})
 		if err != nil {
@@ -473,7 +516,7 @@ func (s *Server) handleAuthorizationCodeGrant(ctx context.Context, w http.Respon
 		oauthResponse["id_token"] = tokenResponse.IDToken
 	}
 
-	return shared.SendJSON(w, http.StatusOK, oauthResponse)
+	return shared.SendTokenJSON(w, http.StatusOK, oauthResponse)
 }
 
 // handleRefreshTokenGrant handles the refresh_token grant type
@@ -497,6 +540,7 @@ func (s *Server) handleRefreshTokenGrant(ctx context.Context, w http.ResponseWri
 	db := s.db.WithContext(ctx)
 	tokenResponse, err := tokenService.RefreshTokenGrant(ctx, db, r, w.Header(), tokens.RefreshTokenGrantParams{
 		RefreshToken: params.RefreshToken,
+		Resource:     params.Resource,
 		ClientID:     clientID,
 	})
 	if err != nil {
@@ -511,7 +555,7 @@ func (s *Server) handleRefreshTokenGrant(ctx context.Context, w http.ResponseWri
 		"refresh_token": tokenResponse.RefreshToken,
 	}
 
-	return shared.SendJSON(w, http.StatusOK, oauthResponse)
+	return shared.SendTokenJSON(w, http.StatusOK, oauthResponse)
 }
 
 // getTokenService retrieves the token service from the server
@@ -611,6 +655,13 @@ func (s *Server) UserRevokeOAuthGrant(w http.ResponseWriter, r *http.Request) er
 	// Revoke the consent in a transaction
 	err = db.Transaction(func(tx *storage.Connection) error {
 		if terr := consent.Revoke(tx); terr != nil {
+			return terr
+		}
+
+		// Approved codes must not recreate a grant after it has been revoked.
+		// Delete authorizations before sessions: an exchange holding a code row
+		// lock completes first, and its newly created session is then revoked too.
+		if terr := tx.Where("user_id = ? AND client_id = ?", user.ID, clientID).Delete(&models.OAuthServerAuthorization{}); terr != nil {
 			return terr
 		}
 

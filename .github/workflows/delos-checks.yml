@@ -1,0 +1,54 @@
+name: Delos Auth checks
+
+on:
+  pull_request:
+  push:
+    branches: ['upgrade/**', 'delos-production']
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    if: github.repository == 'Delos-Intelligence/auth'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: root
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417
+        with:
+          go-version-file: go.mod
+      - name: Formatting
+        run: test -z "$(gofmt -l internal cmd main.go)"
+      - name: Build and vet
+        run: |
+          go mod verify
+          go build -o auth .
+          go vet ./...
+      - name: Upstream static analysis
+        run: |
+          make -C tools
+          make check-go-version static sec vulncheck
+      - name: Initialize database and migrate
+        run: |
+          psql -v ON_ERROR_STOP=1 -f hack/init_postgres.sql postgresql://postgres:root@localhost:5432/postgres
+          make migrate_test
+      - name: Upstream and Delos regression tests
+        run: go test ./... -p 1 -race -count=1 -timeout=20m
+      - name: Upgrade from the deployed Delos schema
+        env:
+          DELOS_TEST_POSTGRES_URL: postgresql://postgres:root@localhost:5432/postgres
+          DELOS_TEST_AUTH_URL: postgresql://supabase_auth_admin:root@localhost:5432/delos_auth_upgrade_test
+        run: bash hack/delos-test-upgrade.sh

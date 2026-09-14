@@ -92,9 +92,11 @@ type Session struct {
 	UserAgent   *string    `json:"user_agent,omitempty" db:"user_agent"`
 	IP          *string    `json:"ip,omitempty" db:"ip"`
 
-	Tag           *string    `json:"tag" db:"tag"`
-	OAuthClientID *uuid.UUID `json:"oauth_client_id" db:"oauth_client_id"`
-	Scopes        *string    `json:"scopes,omitempty" db:"scopes"` // OAuth scopes granted for this session
+	Tag             *string    `json:"tag" db:"tag"`
+	OAuthClientID   *uuid.UUID `json:"oauth_client_id" db:"oauth_client_id"`
+	DelosAccessMode *string    `json:"-" db:"delos_access_mode"`
+	DelosResource   *string    `json:"-" db:"delos_resource"`
+	Scopes          *string    `json:"scopes,omitempty" db:"scopes"` // OAuth scopes granted for this session
 
 	RefreshTokenHmacKey *string `json:"-" db:"refresh_token_hmac_key"`
 	RefreshTokenCounter *int64  `json:"-" db:"refresh_token_counter"`
@@ -103,6 +105,21 @@ type Session struct {
 func (Session) TableName() string {
 	tableName := "sessions"
 	return tableName
+}
+
+func (s *Session) IsRecovery() bool {
+	for _, claim := range s.AMRClaims {
+		amStr := claim.GetAuthenticationMethod()
+		am, err := ParseAuthenticationMethod(amStr)
+		if err != nil {
+			// We want to assert this is a recovery session, skip invalid.
+			continue
+		}
+		if am.IsRecovery() {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Session) GetRefreshTokenHmacKey(dbEncryption conf.DatabaseEncryptionConfiguration) ([]byte, bool, error) {
