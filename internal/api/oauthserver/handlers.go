@@ -262,7 +262,7 @@ type OAuthTokenParams struct {
 }
 
 // OAuthToken handles POST /oauth/token
-func (s *Server) OAuthToken(w http.ResponseWriter, r *http.Request) error {
+func (s *Server) OAuthToken(w http.ResponseWriter, r *http.Request) (resultErr error) {
 	shared.SetTokenResponseHeaders(w)
 	ctx := r.Context()
 
@@ -297,6 +297,16 @@ func (s *Server) OAuthToken(w http.ResponseWriter, r *http.Request) error {
 	client := shared.GetOAuthServerClient(ctx)
 	if client == nil {
 		return apierrors.NewOAuthError("invalid_client", "Client authentication required")
+	}
+
+	if params.GrantType == GrantTypeAuthorizationCode || params.GrantType == GrantTypeRefreshToken {
+		event := "signin"
+		if params.GrantType == GrantTypeRefreshToken {
+			event = "refresh"
+		}
+		defer func() {
+			models.ObserveDelosOAuthActivity(ctx, s.db, "native", client.ID.String(), event, resultErr == nil)
+		}()
 	}
 
 	// Validate that the authenticated client is allowed to use the requested grant type

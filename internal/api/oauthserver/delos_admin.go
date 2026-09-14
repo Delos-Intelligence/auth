@@ -44,12 +44,18 @@ func (s *Server) DelosPolicyPut(w http.ResponseWriter, r *http.Request) error {
 	policy.ClientID = client.ID
 	validation := *policy
 	validation.Enabled = true // Disabling a valid policy is allowed.
+	if policy.AllowSessionMigration && (policy.AccessMode != "full" || policy.ClientKey == nil || !client.IsPublic()) {
+		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Session migration requires a named, public first-party full client")
+	}
+	if policy.ClientKey != nil && !models.ValidDelosScopeName(*policy.ClientKey) {
+		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Invalid client lookup key")
+	}
 	if err := validation.ValidateGrant(policy.AllowedScopes, policy.Resource); err != nil {
 		return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Invalid scopes, mode or resource")
 	}
 	table := (&pop.Model{Value: models.DelosOAuthClientPolicy{}}).TableName()
 	err := s.db.WithContext(r.Context()).Transaction(func(tx *storage.Connection) error {
-		if err := tx.RawQuery("INSERT INTO "+table+" (client_id, allowed_scopes, access_mode, resource, enabled, require_aal2) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (client_id) DO UPDATE SET allowed_scopes = EXCLUDED.allowed_scopes, access_mode = EXCLUDED.access_mode, resource = EXCLUDED.resource, enabled = EXCLUDED.enabled, require_aal2 = EXCLUDED.require_aal2", policy.ClientID, policy.AllowedScopes, policy.AccessMode, policy.Resource, policy.Enabled, policy.RequireAAL2).Exec(); err != nil {
+		if err := tx.RawQuery("INSERT INTO "+table+" (client_id, allowed_scopes, access_mode, resource, enabled, require_aal2, client_key, allow_session_migration) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (client_id) DO UPDATE SET allowed_scopes = EXCLUDED.allowed_scopes, access_mode = EXCLUDED.access_mode, resource = EXCLUDED.resource, enabled = EXCLUDED.enabled, require_aal2 = EXCLUDED.require_aal2, client_key = EXCLUDED.client_key, allow_session_migration = EXCLUDED.allow_session_migration", policy.ClientID, policy.AllowedScopes, policy.AccessMode, policy.Resource, policy.Enabled, policy.RequireAAL2, policy.ClientKey, policy.AllowSessionMigration).Exec(); err != nil {
 			return err
 		}
 		if policy.Enabled {

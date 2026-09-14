@@ -401,6 +401,8 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 			// Admin only oauth client management endpoints
 			r.Route("/oauth", func(r *router) {
 				r.Use(api.requireOAuthServerEnabled)
+				r.Get("/activity", api.oauthServer.DelosActivity)
+				r.Post("/activity/legacy", api.oauthServer.DelosLegacyActivity)
 				r.Get("/scopes", api.oauthServer.DelosScopesList)
 				r.Put("/scopes/{scope}", api.oauthServer.DelosScopePut)
 				r.Route("/clients", func(r *router) {
@@ -438,6 +440,7 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 
 		// OAuth Dynamic Client Registration endpoint (public, rate limited)
 		r.Route("/oauth", func(r *router) {
+			r.With(api.requireOAuthServerEnabled).Get("/clients/by-key/{client_key}", api.oauthServer.DelosClientConfig)
 			r.Use(api.requireOAuthServerEnabled)
 			r.With(api.limitHandler(api.limiterOpts.OAuthClientRegister)).
 				Post("/clients/register", api.oauthServer.OAuthServerClientDynamicRegister)
@@ -447,6 +450,7 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 
 			// OIDC UserInfo endpoint (requires user authentication via Bearer token)
 			r.With(api.requireAuthentication).Get("/userinfo", api.oauthServer.OAuthUserInfo)
+			r.With(api.requireAuthentication).Post("/migrate-session", api.oauthServer.DelosMigrateSession)
 
 			// OAuth 2.1 Authorization endpoints
 			// `/authorize` to initiate OAuth2 authorization code flow where Supabase Auth is the OAuth2 provider

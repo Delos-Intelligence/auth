@@ -189,7 +189,13 @@ func (s *Service) SetTimeFunc(timeFunc func() time.Time) {
 }
 
 // RefreshTokenGrant implements the refresh_token grant type flow
-func (s *Service) RefreshTokenGrant(ctx context.Context, db *storage.Connection, r *http.Request, responseHeaders http.Header, params RefreshTokenGrantParams) (*AccessTokenResponse, error) {
+func (s *Service) RefreshTokenGrant(ctx context.Context, db *storage.Connection, r *http.Request, responseHeaders http.Header, params RefreshTokenGrantParams) (result *AccessTokenResponse, resultErr error) {
+	legacyClientKey := ""
+	defer func() {
+		if legacyClientKey != "" {
+			models.ObserveDelosOAuthActivity(ctx, db, "legacy", legacyClientKey, "refresh", resultErr == nil)
+		}
+	}()
 	db = db.WithContext(ctx)
 	config := s.config
 
@@ -233,6 +239,12 @@ func (s *Service) RefreshTokenGrant(ctx context.Context, db *storage.Connection,
 		}
 
 		responseHeaders.Set("sb-auth-session-id", session.ID.String())
+		if session.OAuthClientID == nil && legacyClientKey == "" {
+			var linked models.DelosOAuthLegacySession
+			if err := db.Where("session_id = ?", session.ID).First(&linked); err == nil {
+				legacyClientKey = linked.ClientKey
+			}
+		}
 
 		// OAuth client validation will be done inside the transaction
 		var sessionClientID *uuid.UUID

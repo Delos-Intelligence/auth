@@ -16,12 +16,14 @@ var ErrDelosOAuthPolicy = errors.New("OAuth grant is not permitted by the client
 // Policies are administrator-owned. Dynamic registration cannot grant access.
 // The resource is an exact binding, not an origin/prefix allowlist.
 type DelosOAuthClientPolicy struct {
-	ClientID      uuid.UUID `db:"client_id" json:"client_id"`
-	AllowedScopes string    `db:"allowed_scopes" json:"allowed_scopes"`
-	AccessMode    string    `db:"access_mode" json:"access_mode"`
-	Resource      string    `db:"resource" json:"resource"`
-	Enabled       bool      `db:"enabled" json:"enabled"`
-	RequireAAL2   bool      `db:"require_aal2" json:"require_aal2"`
+	AllowSessionMigration bool      `db:"allow_session_migration" json:"allow_session_migration"`
+	ClientID              uuid.UUID `db:"client_id" json:"client_id"`
+	AllowedScopes         string    `db:"allowed_scopes" json:"allowed_scopes"`
+	AccessMode            string    `db:"access_mode" json:"access_mode"`
+	Resource              string    `db:"resource" json:"resource"`
+	Enabled               bool      `db:"enabled" json:"enabled"`
+	RequireAAL2           bool      `db:"require_aal2" json:"require_aal2"`
+	ClientKey             *string   `db:"client_key" json:"client_key"`
 }
 
 func (DelosOAuthClientPolicy) TableName() string { return "delos_oauth_client_policies" }
