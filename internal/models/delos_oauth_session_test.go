@@ -60,6 +60,8 @@ func TestDelosOAuthSessionProof(t *testing.T) {
 		mode := "delegated"
 		s.DelosAccessMode = &mode
 		require.Error(t, verify(&s, &user, "aal1", false))
+		_, _, err := DelosSessionProof(&s, &user, now, "aal1", false, SessionValidityConfig{}, now)
+		require.NoError(t, err, "delegated evidence remains valid for its own resource")
 	})
 	t.Run("verified MFA timestamps survive", func(t *testing.T) {
 		s, u := source, user

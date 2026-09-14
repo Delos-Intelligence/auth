@@ -401,6 +401,8 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 			// Admin only oauth client management endpoints
 			r.Route("/oauth", func(r *router) {
 				r.Use(api.requireOAuthServerEnabled)
+				r.Get("/scopes", api.oauthServer.DelosScopesList)
+				r.Put("/scopes/{scope}", api.oauthServer.DelosScopePut)
 				r.Route("/clients", func(r *router) {
 					// Manual client registration
 					r.Post("/", api.oauthServer.AdminOAuthServerClientRegister)
@@ -413,6 +415,8 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 						r.Put("/", api.oauthServer.OAuthServerClientUpdate)
 						r.Delete("/", api.oauthServer.OAuthServerClientDelete)
 						r.Post("/regenerate_secret", api.oauthServer.OAuthServerClientRegenerateSecret)
+						r.Get("/delos-policy", api.oauthServer.DelosPolicyGet)
+						r.Put("/delos-policy", api.oauthServer.DelosPolicyPut)
 					})
 				})
 			})

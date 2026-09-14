@@ -35,11 +35,15 @@ type AuthorizeParams struct {
 
 // AuthorizationDetailsResponse represents the response for getting authorization details
 type AuthorizationDetailsResponse struct {
-	AuthorizationID string                `json:"authorization_id"`
-	RedirectURI     string                `json:"redirect_uri,omitempty"`
-	Client          ClientDetailsResponse `json:"client,omitempty"`
-	User            UserDetailsResponse   `json:"user,omitempty"`
-	Scope           string                `json:"scope,omitempty"`
+	AuthorizationID string                   `json:"authorization_id"`
+	RedirectURI     string                   `json:"redirect_uri,omitempty"`
+	Client          ClientDetailsResponse    `json:"client,omitempty"`
+	User            UserDetailsResponse      `json:"user,omitempty"`
+	Scope           string                   `json:"scope,omitempty"`
+	AccessMode      string                   `json:"delos_access_mode,omitempty"`
+	Resource        string                   `json:"resource,omitempty"`
+	RequireAAL2     bool                     `json:"require_aal2,omitempty"`
+	CustomScopes    []models.DelosOAuthScope `json:"custom_scopes,omitempty"`
 }
 
 // ClientDetailsResponse represents client details in authorization response
@@ -304,6 +308,25 @@ func (s *Server) OAuthServerGetAuthorization(w http.ResponseWriter, r *http.Requ
 			Email: user.Email.String(),
 		},
 		Scope: authorization.Scope,
+	}
+	if s.config.OAuthServer.DelosPolicyEnabled {
+		policy, err := s.delosPolicy(db, client.ID, authorization.Scope, utilities.StringValue(authorization.Resource))
+		if err != nil {
+			return err
+		}
+		response.AccessMode = policy.AccessMode
+		response.Resource = policy.Resource
+		response.RequireAAL2 = policy.RequireAAL2
+		for _, name := range models.ParseScopeString(authorization.Scope) {
+			if models.IsSupportedScope(name) {
+				continue
+			}
+			var definition models.DelosOAuthScope
+			if err := db.Where("name = ? AND enabled = true", name).First(&definition); err != nil {
+				return apierrors.NewInternalServerError("Unable to describe OAuth scopes").WithInternalError(err)
+			}
+			response.CustomScopes = append(response.CustomScopes, definition)
+		}
 	}
 
 	return shared.SendJSON(w, http.StatusOK, response)

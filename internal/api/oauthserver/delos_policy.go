@@ -46,7 +46,10 @@ func (s *Server) bindDelosSource(tx *storage.Connection, ctx context.Context, au
 	// Reload the source inside the consent transaction; context can be stale.
 	source, err = models.FindSessionByID(tx, source.ID, false)
 	if err != nil {
-		return apierrors.NewOAuthError("login_required", "Source session is unavailable")
+		if models.IsNotFoundError(err) {
+			return apierrors.NewOAuthError("login_required", "Source session is unavailable")
+		}
+		return apierrors.NewInternalServerError("Unable to load source session").WithInternalError(err)
 	}
 	_, aal, err := models.DelosOAuthProof(source, user, time.Now(), "", policy.RequireAAL2, s.delosSessionValidity(), time.Now())
 	if err != nil {

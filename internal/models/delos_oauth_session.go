@@ -11,8 +11,17 @@ import (
 // DelosOAuthProof uses persisted authentication evidence, never app_metadata
 // or a client-provided AAL. Approval cannot acquire stronger MFA after the fact.
 func DelosOAuthProof(source *Session, user *User, approvedAt time.Time, expectedAAL string, requireAAL2 bool, validity SessionValidityConfig, now time.Time) ([]AMRClaim, AuthenticatorAssuranceLevel, error) {
+	if source != nil && source.DelosAccessMode != nil && *source.DelosAccessMode != "full" {
+		return nil, AAL1, ErrDelosOAuthPolicy
+	}
+	return DelosSessionProof(source, user, approvedAt, expectedAAL, requireAAL2, validity, now)
+}
+
+// DelosSessionProof also validates an already issued delegated session. Such a
+// session can access its resource, but DelosOAuthProof refuses it as a source
+// for issuing another grant.
+func DelosSessionProof(source *Session, user *User, approvedAt time.Time, expectedAAL string, requireAAL2 bool, validity SessionValidityConfig, now time.Time) ([]AMRClaim, AuthenticatorAssuranceLevel, error) {
 	if source == nil || source.UserID != user.ID || user.IsAnonymous || user.IsBanned() ||
-		(source.DelosAccessMode != nil && *source.DelosAccessMode != "full") ||
 		source.CheckValidity(validity, now, nil, user.HighestPossibleAAL()) != SessionValid {
 		return nil, AAL1, ErrDelosOAuthPolicy
 	}
