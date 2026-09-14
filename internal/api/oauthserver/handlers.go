@@ -262,7 +262,7 @@ type OAuthTokenParams struct {
 }
 
 // OAuthToken handles POST /oauth/token
-func (s *Server) OAuthToken(w http.ResponseWriter, r *http.Request) error {
+func (s *Server) OAuthToken(w http.ResponseWriter, r *http.Request) (resultErr error) {
 	shared.SetTokenResponseHeaders(w)
 	ctx := r.Context()
 
@@ -297,6 +297,16 @@ func (s *Server) OAuthToken(w http.ResponseWriter, r *http.Request) error {
 	client := shared.GetOAuthServerClient(ctx)
 	if client == nil {
 		return apierrors.NewOAuthError("invalid_client", "Client authentication required")
+	}
+
+	if params.GrantType == GrantTypeAuthorizationCode || params.GrantType == GrantTypeRefreshToken {
+		event := "signin"
+		if params.GrantType == GrantTypeRefreshToken {
+			event = "refresh"
+		}
+		defer func() {
+			models.ObserveDelosOAuthActivity(ctx, s.db, "native", client.ID.String(), event, resultErr == nil)
+		}()
 	}
 
 	// Validate that the authenticated client is allowed to use the requested grant type
@@ -387,6 +397,7 @@ func (s *Server) handleAuthorizationCodeGrant(ctx context.Context, w http.Respon
 	// Exchange the authorization code for tokens
 	var tokenResponse *tokens.AccessTokenResponse
 	var grantParams models.GrantParams
+	var sourceAuthTime *time.Time
 	grantParams.FillGrantParams(r)
 	grantParams.OAuthClientID = &client.ID
 
@@ -400,6 +411,35 @@ func (s *Server) handleAuthorizationCodeGrant(ctx context.Context, w http.Respon
 				return apierrors.NewOAuthError("invalid_grant", "Invalid authorization code")
 			}
 			return apierrors.NewInternalServerError("Error locking authorization code").WithInternalError(terr)
+		}
+
+		if s.config.OAuthServer.DelosPolicyEnabled {
+			policy, err := s.delosPolicy(tx, client.ID, scopes, utilities.StringValue(authorization.Resource))
+			if err != nil {
+				return err
+			}
+			if authorization.DelosSourceSessionID == nil || authorization.DelosSourceAAL == nil || authorization.ApprovedAt == nil {
+				return apierrors.NewOAuthError("invalid_grant", "Missing source authentication")
+			}
+			source, err := models.FindSessionByID(tx, *authorization.DelosSourceSessionID, false)
+			if err != nil {
+				return apierrors.NewOAuthError("invalid_grant", "Source session is unavailable")
+			}
+			evidence, aal, err := models.DelosOAuthProof(source, user, *authorization.ApprovedAt, *authorization.DelosSourceAAL, policy.RequireAAL2, s.delosSessionValidity(), time.Now())
+			if err != nil {
+				return apierrors.NewOAuthError("invalid_grant", "Source authentication is no longer sufficient")
+			}
+			for _, claim := range evidence {
+				if sourceAuthTime == nil || claim.UpdatedAt.After(*sourceAuthTime) {
+					timestamp := claim.UpdatedAt
+					sourceAuthTime = &timestamp
+				}
+			}
+			grantParams.DelosAMRClaims = evidence
+			grantParams.DelosAAL = aal
+			grantParams.FactorID = source.FactorID
+			grantParams.DelosAccessMode = &policy.AccessMode
+			grantParams.DelosResource = &policy.Resource
 		}
 
 		authMethod := models.OAuthProviderAuthorizationCode
@@ -446,11 +486,14 @@ func (s *Server) handleAuthorizationCodeGrant(ctx context.Context, w http.Respon
 			nonce = *authorization.Nonce
 		}
 
+		if sourceAuthTime == nil {
+			sourceAuthTime = user.LastSignInAt
+		}
 		idToken, err := tokenService.GenerateIDToken(ctx, tokens.GenerateIDTokenParams{
 			User:     user,
 			ClientID: client.ID,
 			Nonce:    nonce,
-			AuthTime: user.LastSignInAt,
+			AuthTime: sourceAuthTime,
 			Scopes:   scopeList,
 		})
 		if err != nil {
@@ -497,6 +540,7 @@ func (s *Server) handleRefreshTokenGrant(ctx context.Context, w http.ResponseWri
 	db := s.db.WithContext(ctx)
 	tokenResponse, err := tokenService.RefreshTokenGrant(ctx, db, r, w.Header(), tokens.RefreshTokenGrantParams{
 		RefreshToken: params.RefreshToken,
+		Resource:     params.Resource,
 		ClientID:     clientID,
 	})
 	if err != nil {
@@ -611,6 +655,13 @@ func (s *Server) UserRevokeOAuthGrant(w http.ResponseWriter, r *http.Request) er
 	// Revoke the consent in a transaction
 	err = db.Transaction(func(tx *storage.Connection) error {
 		if terr := consent.Revoke(tx); terr != nil {
+			return terr
+		}
+
+		// Approved codes must not recreate a grant after it has been revoked.
+		// Delete authorizations before sessions: an exchange holding a code row
+		// lock completes first, and its newly created session is then revoked too.
+		if terr := tx.Where("user_id = ? AND client_id = ?", user.ID, clientID).Delete(&models.OAuthServerAuthorization{}); terr != nil {
 			return terr
 		}
 

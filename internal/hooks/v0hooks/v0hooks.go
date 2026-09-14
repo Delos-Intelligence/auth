@@ -110,6 +110,8 @@ type AccessTokenClaims struct {
 	IsAnonymous                   bool                   `json:"is_anonymous"`
 	ClientID                      string                 `json:"client_id,omitempty"`
 	Scope                         string                 `json:"scope,omitempty"`
+	DelosAccessMode               string                 `json:"delos_access_mode,omitempty"`
+	DelosResource                 string                 `json:"resource,omitempty"`
 }
 
 type MFAVerificationAttemptInput struct {

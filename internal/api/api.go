@@ -401,6 +401,10 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 			// Admin only oauth client management endpoints
 			r.Route("/oauth", func(r *router) {
 				r.Use(api.requireOAuthServerEnabled)
+				r.Get("/activity", api.oauthServer.DelosActivity)
+				r.Post("/activity/legacy", api.oauthServer.DelosLegacyActivity)
+				r.Get("/scopes", api.oauthServer.DelosScopesList)
+				r.Put("/scopes/{scope}", api.oauthServer.DelosScopePut)
 				r.Route("/clients", func(r *router) {
 					// Manual client registration
 					r.Post("/", api.oauthServer.AdminOAuthServerClientRegister)
@@ -413,6 +417,8 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 						r.Put("/", api.oauthServer.OAuthServerClientUpdate)
 						r.Delete("/", api.oauthServer.OAuthServerClientDelete)
 						r.Post("/regenerate_secret", api.oauthServer.OAuthServerClientRegenerateSecret)
+						r.Get("/delos-policy", api.oauthServer.DelosPolicyGet)
+						r.Put("/delos-policy", api.oauthServer.DelosPolicyPut)
 					})
 				})
 			})
@@ -435,6 +441,7 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 		// OAuth Dynamic Client Registration endpoint (public, rate limited)
 		r.Route("/oauth", func(r *router) {
 			r.Use(api.requireOAuthServerEnabled)
+			r.Get("/clients/by-key/{client_key}", api.oauthServer.DelosClientConfig)
 			r.With(api.limitHandler(api.limiterOpts.OAuthClientRegister)).
 				Post("/clients/register", api.oauthServer.OAuthServerClientDynamicRegister)
 
@@ -443,6 +450,7 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 
 			// OIDC UserInfo endpoint (requires user authentication via Bearer token)
 			r.With(api.requireAuthentication).Get("/userinfo", api.oauthServer.OAuthUserInfo)
+			r.With(api.requireAuthentication).Post("/migrate-session", api.oauthServer.DelosMigrateSession)
 
 			// OAuth 2.1 Authorization endpoints
 			// `/authorize` to initiate OAuth2 authorization code flow where Supabase Auth is the OAuth2 provider

@@ -3,6 +3,7 @@ package tokens
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	mathRand "math/rand"
@@ -83,6 +84,8 @@ type AccessTokenClaims struct {
 	IsAnonymous                   bool                   `json:"is_anonymous"`
 	ClientID                      string                 `json:"client_id,omitempty"`
 	Scope                         string                 `json:"scope,omitempty"`
+	DelosAccessMode               string                 `json:"delos_access_mode,omitempty"`
+	DelosResource                 string                 `json:"resource,omitempty"`
 }
 
 // IDTokenClaims represents OpenID Connect ID Token claims
@@ -134,6 +137,7 @@ type GenerateIDTokenParams struct {
 
 // RefreshTokenGrantParams contains parameters for refresh token grant
 type RefreshTokenGrantParams struct {
+	Resource     string // Optional RFC8707 indicator; cannot change an existing grant.
 	RefreshToken string
 	ClientID     *uuid.UUID // OAuth2 server client ID if applicable
 }
@@ -185,7 +189,13 @@ func (s *Service) SetTimeFunc(timeFunc func() time.Time) {
 }
 
 // RefreshTokenGrant implements the refresh_token grant type flow
-func (s *Service) RefreshTokenGrant(ctx context.Context, db *storage.Connection, r *http.Request, responseHeaders http.Header, params RefreshTokenGrantParams) (*AccessTokenResponse, error) {
+func (s *Service) RefreshTokenGrant(ctx context.Context, db *storage.Connection, r *http.Request, responseHeaders http.Header, params RefreshTokenGrantParams) (result *AccessTokenResponse, resultErr error) {
+	legacyClientKey := ""
+	defer func() {
+		if legacyClientKey != "" {
+			models.ObserveDelosOAuthActivity(ctx, db, "legacy", legacyClientKey, "refresh", resultErr == nil)
+		}
+	}()
 	db = db.WithContext(ctx)
 	config := s.config
 
@@ -229,6 +239,12 @@ func (s *Service) RefreshTokenGrant(ctx context.Context, db *storage.Connection,
 		}
 
 		responseHeaders.Set("sb-auth-session-id", session.ID.String())
+		if session.OAuthClientID == nil && legacyClientKey == "" {
+			var linked models.DelosOAuthLegacySession
+			if err := db.Where("session_id = ?", session.ID).First(&linked); err == nil {
+				legacyClientKey = linked.ClientKey
+			}
+		}
 
 		// OAuth client validation will be done inside the transaction
 		var sessionClientID *uuid.UUID
@@ -289,6 +305,9 @@ func (s *Service) RefreshTokenGrant(ctx context.Context, db *storage.Connection,
 				return apierrors.NewInternalServerError("%s", terr.Error())
 			}
 
+			if params.Resource != "" && (session.DelosResource == nil || params.Resource != *session.DelosResource) {
+				return apierrors.NewOAuthError("invalid_target", "Resource does not match the session grant")
+			}
 			// Validate OAuth client consistency between session and current request
 			if session.OAuthClientID != nil && *session.OAuthClientID != uuid.Nil {
 				// Session has an OAuth client, current request must have matching client
@@ -600,6 +619,9 @@ func (s *Service) RefreshTokenGrant(ctx context.Context, db *storage.Connection,
 				if ok {
 					return httpErr
 				}
+				if oauthErr, ok := terr.(*apierrors.OAuthError); ok {
+					return oauthErr
+				}
 				return apierrors.NewInternalServerError("error generating jwt token").WithInternalError(terr)
 			}
 
@@ -717,6 +739,34 @@ func (s *Service) GenerateAccessToken(r *http.Request, tx *storage.Connection, p
 		Scope:                         scopes,
 	}
 
+	if session.DelosAccessMode != nil || (config.OAuthServer.DelosPolicyEnabled && session.OAuthClientID != nil) {
+		if session.OAuthClientID == nil || session.DelosAccessMode == nil || session.DelosResource == nil {
+			return "", 0, apierrors.NewOAuthError("invalid_grant", "Missing OAuth session policy")
+		}
+		policy, err := models.FindDelosOAuthPolicy(tx, *session.OAuthClientID, scopes, *session.DelosResource)
+		if err != nil {
+			if errors.Is(err, models.ErrDelosOAuthPolicy) {
+				return "", 0, apierrors.NewOAuthError("invalid_grant", err.Error())
+			}
+			return "", 0, apierrors.NewInternalServerError("Unable to validate OAuth policy").WithInternalError(err)
+		}
+		if policy.AccessMode != *session.DelosAccessMode {
+			return "", 0, apierrors.NewOAuthError("invalid_grant", "OAuth access mode changed; authorize again")
+		}
+		if (policy.RequireAAL2 || params.User.HighestPossibleAAL() == models.AAL2) && aal != models.AAL2 {
+			return "", 0, apierrors.NewOAuthError("invalid_grant", "MFA is required; authorize again")
+		}
+		if aal == models.AAL2 && !models.HasVerifiedDelosFactor(session, params.User) {
+			return "", 0, apierrors.NewOAuthError("invalid_grant", "MFA factor is no longer valid")
+		}
+		claims.ClientID = session.OAuthClientID.String()
+		claims.DelosAccessMode = policy.AccessMode
+		claims.DelosResource = policy.Resource
+		if policy.AccessMode == "delegated" {
+			claims.Role = models.DelosDelegatedRole
+		}
+	}
+
 	var gotrueClaims jwt.Claims = claims
 	if config.Hook.CustomAccessToken.Enabled {
 		input := v0hooks.NewCustomAccessTokenInput(
@@ -734,6 +784,18 @@ func (s *Service) GenerateAccessToken(r *http.Request, tx *storage.Connection, p
 		}
 		if err := validateTokenClaims(output.Claims); err != nil {
 			return "", 0, err
+		}
+		// A custom hook may enrich a token, but cannot remove the grant boundary.
+		if claims.DelosAccessMode != "" {
+			output.Claims["sub"] = claims.Subject
+			output.Claims["session_id"] = claims.SessionId
+			output.Claims["role"] = claims.Role
+			output.Claims["client_id"] = claims.ClientID
+			output.Claims["aal"] = claims.AuthenticatorAssuranceLevel
+			output.Claims["amr"] = claims.AuthenticationMethodReference
+			output.Claims["scope"] = claims.Scope
+			output.Claims["delos_access_mode"] = claims.DelosAccessMode
+			output.Claims["resource"] = claims.DelosResource
 		}
 		gotrueClaims = jwt.MapClaims(output.Claims)
 	}
@@ -927,6 +989,11 @@ func (s *Service) IssueRefreshToken(r *http.Request, responseHeaders http.Header
 			return terr
 		}
 
+		if len(grantParams.DelosAMRClaims) > 0 {
+			if err := models.CopyDelosOAuthProof(tx, sessionID, grantParams.DelosAMRClaims, grantParams.DelosAAL, grantParams.FactorID); err != nil {
+				return err
+			}
+		}
 		tokenString, expiresAt, terr = s.GenerateAccessToken(r, tx, GenerateAccessTokenParams{
 			User:                 user,
 			SessionID:            &sessionID,
@@ -937,6 +1004,9 @@ func (s *Service) IssueRefreshToken(r *http.Request, responseHeaders http.Header
 			// Account for Hook Error
 			if httpErr, ok := terr.(*apierrors.HTTPError); ok {
 				return httpErr
+			}
+			if oauthErr, ok := terr.(*apierrors.OAuthError); ok {
+				return oauthErr
 			}
 			return apierrors.NewInternalServerError("error generating jwt token").WithInternalError(terr)
 		}

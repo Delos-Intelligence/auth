@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/gofrs/uuid"
 	jwt "github.com/golang-jwt/jwt/v5"
@@ -33,12 +35,64 @@ func (a *API) requireAuthentication(w http.ResponseWriter, r *http.Request) (con
 		return ctx, err
 	}
 
+	if err := a.validateDelosAccess(ctx); err != nil {
+		return ctx, err
+	}
+
+	if claims := getClaims(ctx); claims != nil && claims.DelosAccessMode == "delegated" {
+		// UserInfo has its own scope filtering. Other authenticated endpoints
+		// can modify account state, issue another grant or revoke other sessions.
+		if r.Method != http.MethodGet || r.URL.Path != "/oauth/userinfo" {
+			return ctx, apierrors.NewForbiddenError(apierrors.ErrorCodeNoAuthorization, "Delegated token cannot access account endpoints")
+		}
+	}
+
 	// Reject banned users who still hold an access token issued before the ban
 	if user := getUser(ctx); user != nil && user.IsBanned() {
 		return ctx, apierrors.NewForbiddenError(apierrors.ErrorCodeUserBanned, "User is banned")
 	}
 
 	return ctx, nil
+}
+
+// Resource servers use UserInfo to check revocation and policy changes. JWT
+// expiry alone must not keep a disabled client, removed scope or MFA factor live.
+// Persisted stamps keep this check active even if new authorizations are disabled.
+func (a *API) validateDelosAccess(ctx context.Context) error {
+	claims, session, user := getClaims(ctx), getSession(ctx), getUser(ctx)
+	if claims.DelosAccessMode == "" && (session == nil || session.DelosAccessMode == nil) {
+		return nil
+	}
+	denied := func() error {
+		return apierrors.NewForbiddenError(apierrors.ErrorCodeNoAuthorization, "OAuth session is no longer authorized")
+	}
+	if session == nil || session.OAuthClientID == nil || session.DelosAccessMode == nil || session.DelosResource == nil || session.Scopes == nil ||
+		claims.ClientID != session.OAuthClientID.String() || claims.DelosAccessMode != *session.DelosAccessMode || claims.DelosResource != *session.DelosResource || claims.Scope != *session.Scopes {
+		return denied()
+	}
+	db := a.db.WithContext(ctx)
+	if _, err := models.FindOAuthServerClientByID(db, *session.OAuthClientID); err != nil {
+		if models.IsNotFoundError(err) {
+			return denied()
+		}
+		return apierrors.NewInternalServerError("Unable to validate OAuth client").WithInternalError(err)
+	}
+	policy, err := models.FindDelosOAuthPolicy(db, *session.OAuthClientID, claims.Scope, claims.DelosResource)
+	if err != nil {
+		if errors.Is(err, models.ErrDelosOAuthPolicy) {
+			return denied()
+		}
+		return apierrors.NewInternalServerError("Unable to validate OAuth policy").WithInternalError(err)
+	}
+	if policy.AccessMode != claims.DelosAccessMode || (policy.AccessMode == "delegated" && claims.Role != models.DelosDelegatedRole) || (policy.AccessMode == "full" && claims.Role != user.Role) {
+		return denied()
+	}
+	now := time.Now()
+	validity := models.SessionValidityConfig{Timebox: a.config.Sessions.Timebox, InactivityTimeout: a.config.Sessions.InactivityTimeout, AllowLowAAL: a.config.Sessions.AllowLowAAL}
+	if _, _, err := models.DelosSessionProof(session, user, now, claims.AuthenticatorAssuranceLevel, policy.RequireAAL2, validity, now); err != nil {
+		return denied()
+	}
+	return nil
 }
 
 func (a *API) requireNotAnonymous(w http.ResponseWriter, r *http.Request) (context.Context, error) {

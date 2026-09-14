@@ -35,11 +35,15 @@ type AuthorizeParams struct {
 
 // AuthorizationDetailsResponse represents the response for getting authorization details
 type AuthorizationDetailsResponse struct {
-	AuthorizationID string                `json:"authorization_id"`
-	RedirectURI     string                `json:"redirect_uri,omitempty"`
-	Client          ClientDetailsResponse `json:"client,omitempty"`
-	User            UserDetailsResponse   `json:"user,omitempty"`
-	Scope           string                `json:"scope,omitempty"`
+	AuthorizationID string                   `json:"authorization_id"`
+	RedirectURI     string                   `json:"redirect_uri,omitempty"`
+	Client          ClientDetailsResponse    `json:"client,omitempty"`
+	User            UserDetailsResponse      `json:"user,omitempty"`
+	Scope           string                   `json:"scope,omitempty"`
+	AccessMode      string                   `json:"delos_access_mode,omitempty"`
+	Resource        string                   `json:"resource,omitempty"`
+	RequireAAL2     bool                     `json:"require_aal2,omitempty"`
+	CustomScopes    []models.DelosOAuthScope `json:"custom_scopes,omitempty"`
 }
 
 // ClientDetailsResponse represents client details in authorization response
@@ -135,6 +139,10 @@ func (s *Server) OAuthServerAuthorize(w http.ResponseWriter, r *http.Request) er
 		return nil
 	}
 
+	if err := s.validateDelosPolicy(db, client.ID, params.Scope, params.Resource); err != nil {
+		return err
+	}
+
 	// Store authorization request in database (without user initially)
 	authorization := models.NewOAuthServerAuthorization(models.NewOAuthServerAuthorizationParams{
 		ClientID:            client.ID,
@@ -225,6 +233,10 @@ func (s *Server) OAuthServerGetAuthorization(w http.ResponseWriter, r *http.Requ
 			return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "authorization request cannot be processed")
 		}
 
+		if err := s.validateDelosPolicy(tx, auth.ClientID, auth.Scope, utilities.StringValue(auth.Resource)); err != nil {
+			return err
+		}
+
 		if auth.UserID == nil {
 			if err := auth.SetUser(tx, user.ID); err != nil {
 				return err
@@ -235,7 +247,7 @@ func (s *Server) OAuthServerGetAuthorization(w http.ResponseWriter, r *http.Requ
 				return cerr
 			}
 
-			if existingConsent != nil && s.consentCoversScopes(existingConsent, auth.Scope) {
+			if existingConsent != nil && s.consentCoversScopes(existingConsent, auth.Scope) && !(s.config.OAuthServer.DelosPolicyEnabled && utilities.StringValue(auth.Resource) != "") {
 				shouldAutoApprove = true
 			}
 		} else if *auth.UserID != user.ID {
@@ -244,6 +256,10 @@ func (s *Server) OAuthServerGetAuthorization(w http.ResponseWriter, r *http.Requ
 				WithField("authorization_id", auth.AuthorizationID).
 				Warn("authorization belongs to different user")
 			return apierrors.NewNotFoundError(apierrors.ErrorCodeOAuthAuthorizationNotFound, "authorization not found")
+		}
+
+		if err := s.bindDelosSource(tx, ctx, auth, user); err != nil {
+			return err
 		}
 
 		if shouldAutoApprove {
@@ -292,6 +308,25 @@ func (s *Server) OAuthServerGetAuthorization(w http.ResponseWriter, r *http.Requ
 			Email: user.Email.String(),
 		},
 		Scope: authorization.Scope,
+	}
+	if s.config.OAuthServer.DelosPolicyEnabled {
+		policy, err := s.delosPolicy(db, client.ID, authorization.Scope, utilities.StringValue(authorization.Resource))
+		if err != nil {
+			return err
+		}
+		response.AccessMode = policy.AccessMode
+		response.Resource = policy.Resource
+		response.RequireAAL2 = policy.RequireAAL2
+		for _, name := range models.ParseScopeString(authorization.Scope) {
+			if models.IsSupportedScope(name) {
+				continue
+			}
+			var definition models.DelosOAuthScope
+			if err := db.Where("name = ? AND enabled = true", name).First(&definition); err != nil {
+				return apierrors.NewInternalServerError("Unable to describe OAuth scopes").WithInternalError(err)
+			}
+			response.CustomScopes = append(response.CustomScopes, definition)
+		}
 	}
 
 	return shared.SendJSON(w, http.StatusOK, response)
@@ -363,6 +398,12 @@ func (s *Server) OAuthServerConsent(w http.ResponseWriter, r *http.Request) erro
 		}
 
 		if body.Action == OAuthServerConsentActionApprove {
+			if err := s.validateDelosPolicy(tx, authorization.ClientID, authorization.Scope, utilities.StringValue(authorization.Resource)); err != nil {
+				return err
+			}
+			if err := s.bindDelosSource(tx, ctx, authorization, user); err != nil {
+				return err
+			}
 			// Approve authorization
 			if err := authorization.Approve(tx); err != nil {
 				return apierrors.NewInternalServerError("error approving authorization").WithInternalError(err)
@@ -535,6 +576,16 @@ func (s *Server) validateScopes(scopeString string) error {
 	scopes := models.ParseScopeString(scopeString)
 	if len(scopes) == 0 {
 		return errors.New("scope parameter cannot be empty")
+	}
+
+	// Delos scopes are checked against the registry and client policy below.
+	if s.config.OAuthServer.DelosPolicyEnabled {
+		for _, scope := range scopes {
+			if !models.ValidDelosScopeName(scope) {
+				return models.ErrDelosOAuthPolicy
+			}
+		}
+		return nil
 	}
 
 	// Validate each scope against the centrally defined supported scopes

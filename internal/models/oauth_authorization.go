@@ -58,6 +58,9 @@ type OAuthServerAuthorization struct {
 	ExpiresAt           time.Time                      `json:"expires_at" db:"expires_at"`
 	ApprovedAt          *time.Time                     `json:"approved_at" db:"approved_at"`
 
+	DelosSourceSessionID *uuid.UUID `json:"-" db:"delos_source_session_id"`
+	DelosSourceAAL       *string    `json:"-" db:"delos_source_aal"`
+
 	// Relations with OAuth clients
 	Client *OAuthServerClient `json:"client,omitempty" db:"-"`
 }
