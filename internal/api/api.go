@@ -440,8 +440,8 @@ func NewAPIWithVersion(globalConfig *conf.GlobalConfiguration, db *storage.Conne
 
 		// OAuth Dynamic Client Registration endpoint (public, rate limited)
 		r.Route("/oauth", func(r *router) {
-			r.With(api.requireOAuthServerEnabled).Get("/clients/by-key/{client_key}", api.oauthServer.DelosClientConfig)
 			r.Use(api.requireOAuthServerEnabled)
+			r.Get("/clients/by-key/{client_key}", api.oauthServer.DelosClientConfig)
 			r.With(api.limitHandler(api.limiterOpts.OAuthClientRegister)).
 				Post("/clients/register", api.oauthServer.OAuthServerClientDynamicRegister)
 
