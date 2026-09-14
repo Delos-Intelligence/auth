@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/assert"
@@ -683,6 +684,14 @@ func (ts *OAuthClientTestSuite) TestUserRevokeOAuthGrant() {
 	// Create a session for this OAuth client
 	session := ts.createTestSession(user.ID.String(), client.ID.String())
 
+	// An approved code must not survive revocation and recreate this grant.
+	authorization := models.NewOAuthServerAuthorization(models.NewOAuthServerAuthorizationParams{
+		ClientID: client.ID, RedirectURI: "https://example.com/callback", Scope: "email", TTL: time.Minute,
+	})
+	require.NoError(ts.T(), models.CreateOAuthServerAuthorization(ts.DB, authorization))
+	require.NoError(ts.T(), authorization.SetUser(ts.DB, user.ID))
+	require.NoError(ts.T(), authorization.Approve(ts.DB))
+
 	// Create HTTP request with query parameter
 	req := httptest.NewRequest(http.MethodDelete, "/user/oauth/grants?client_id="+client.ID.String(), nil)
 
@@ -709,6 +718,8 @@ func (ts *OAuthClientTestSuite) TestUserRevokeOAuthGrant() {
 	deletedSession, err := models.FindSessionByID(ts.DB, session.ID, false)
 	assert.Error(ts.T(), err, "session should be deleted")
 	assert.Nil(ts.T(), deletedSession)
+	_, err = models.FindOAuthServerAuthorizationByID(ts.DB, authorization.AuthorizationID)
+	assert.True(ts.T(), models.IsNotFoundError(err), "approved authorization should be deleted")
 }
 
 func (ts *OAuthClientTestSuite) TestUserRevokeOAuthGrantNotFound() {

@@ -17,7 +17,9 @@ COPY . /go/src/github.com/supabase/auth
 
 # Supply the version explicitly when building a Delos release.
 ARG RELEASE_VERSION=unspecified
-RUN RELEASE_VERSION=${RELEASE_VERSION} make build
+# Only this platform's binary is copied into the image. `make build` also
+# cross-compiles three unused binaries (particularly slow under arm64 emulation).
+RUN RELEASE_VERSION=${RELEASE_VERSION} make auth
 
 # Always use alpine:3 so the latest version is used. This will keep CA certs more up to date.
 FROM alpine:3

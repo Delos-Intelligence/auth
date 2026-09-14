@@ -41,13 +41,17 @@ func (RefreshToken) TableName() string {
 // GrantParams is used to pass session-specific parameters when issuing a new
 // refresh token to authenticated users.
 type GrantParams struct {
-	FactorID *uuid.UUID
+	DelosAMRClaims []AMRClaim
+	DelosAAL       AuthenticatorAssuranceLevel
+	FactorID       *uuid.UUID
 
 	SessionNotAfter *time.Time
 	SessionTag      *string
 
-	OAuthClientID *uuid.UUID
-	Scopes        *string
+	DelosAccessMode *string
+	DelosResource   *string
+	OAuthClientID   *uuid.UUID
+	Scopes          *string
 
 	UserAgent string
 	IP        string
@@ -142,6 +146,9 @@ func (s *Session) ApplyGrantParams(params *GrantParams) {
 	if params.OAuthClientID != nil && *params.OAuthClientID != uuid.Nil {
 		s.OAuthClientID = params.OAuthClientID
 	}
+
+	s.DelosAccessMode = params.DelosAccessMode
+	s.DelosResource = params.DelosResource
 
 	if params.Scopes != nil && *params.Scopes != "" {
 		s.Scopes = params.Scopes

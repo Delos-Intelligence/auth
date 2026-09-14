@@ -5,6 +5,7 @@ import (
 
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	jwk "github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/supabase/auth/internal/api/apierrors"
 	"github.com/supabase/auth/internal/models"
 )
 
@@ -72,6 +73,18 @@ func (a *API) WellKnownOpenID(w http.ResponseWriter, r *http.Request) error {
 		issuer = issuer[:len(issuer)-1]
 	}
 
+	supportedScopes := append([]string(nil), models.SupportedOAuthScopes...)
+	if config.OAuthServer.DelosPolicyEnabled {
+		var definitions []models.DelosOAuthScope
+		if err := a.db.WithContext(r.Context()).Where("enabled = true").Order("name asc").All(&definitions); err != nil {
+			return apierrors.NewInternalServerError("Unable to load OAuth scopes").WithInternalError(err)
+		}
+		for _, definition := range definitions {
+			if !models.IsSupportedScope(definition.Name) {
+				supportedScopes = append(supportedScopes, definition.Name)
+			}
+		}
+	}
 	response := OpenIDConfigurationResponse{
 		Issuer:                config.JWT.Issuer,
 		AuthorizationEndpoint: issuer + "/oauth/authorize",
@@ -87,7 +100,7 @@ func (a *API) WellKnownOpenID(w http.ResponseWriter, r *http.Request) error {
 		IDTokenSigningAlgValuesSupported:  []string{"RS256", "HS256", "ES256"}, // TODO :: should create this based on signing key config?
 		TokenEndpointAuthMethodsSupported: []string{"client_secret_basic", "client_secret_post", "none"},
 		CodeChallengeMethodsSupported:     []string{"S256", "plain"},
-		ScopesSupported:                   models.SupportedOAuthScopes,
+		ScopesSupported:                   supportedScopes,
 
 		// OIDC Standard Claims
 		ClaimsSupported: []string{

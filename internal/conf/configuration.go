@@ -71,6 +71,8 @@ type OAuthProviderConfiguration struct {
 
 // OAuthServerConfiguration holds OAuth server configuration
 type OAuthServerConfiguration struct {
+	// Delos policy is opt-in; enabling it requires explicit policy for every native client.
+	DelosPolicyEnabled       bool          `json:"delos_policy_enabled" split_words:"true" default:"false"`
 	Enabled                  bool          `json:"enabled" default:"false"`
 	AllowDynamicRegistration bool          `json:"allow_dynamic_registration" split_words:"true"`
 	AuthorizationPath        string        `json:"authorization_path" split_words:"true"`

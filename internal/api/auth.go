@@ -33,6 +33,14 @@ func (a *API) requireAuthentication(w http.ResponseWriter, r *http.Request) (con
 		return ctx, err
 	}
 
+	if claims := getClaims(ctx); claims != nil && claims.DelosAccessMode == "delegated" {
+		// UserInfo has its own scope filtering. Other authenticated endpoints
+		// can modify account state, issue another grant or revoke other sessions.
+		if r.Method != http.MethodGet || r.URL.Path != "/oauth/userinfo" {
+			return ctx, apierrors.NewForbiddenError(apierrors.ErrorCodeNoAuthorization, "Delegated token cannot access account endpoints")
+		}
+	}
+
 	// Reject banned users who still hold an access token issued before the ban
 	if user := getUser(ctx); user != nil && user.IsBanned() {
 		return ctx, apierrors.NewForbiddenError(apierrors.ErrorCodeUserBanned, "User is banned")
